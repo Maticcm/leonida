@@ -80,7 +80,7 @@ l'[issue #166](https://github.com/ItsNotRexed/Leonida/issues/166).
 1. Installez les prérequis ci-dessus.
 2. Clonez le dépôt **avec son sous-module** :
    ```powershell
-   git clone --recursive https://github.com/ItsNotRexed/Leonida
+   git clone --recursive https://github.com/ubiquitarianism/leonida
    ```
    Un « Download ZIP » depuis GitHub n'inclut pas `third_party/rpf9-explorer` : la compilation le récupère si `git`
    est installé, et sinon vous dit quoi faire.
@@ -180,4 +180,4 @@ Le [guide des tests GPU](../../testing.md) explique comment lancer les tests san
 résultats dans l'[issue #166](https://github.com/ItsNotRexed/Leonida/issues/166), un commentaire par GPU et par
 pilote.
 
-[coord]: https://github.com/ItsNotRexed/Leonida/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
+[coord]: https://github.com/ubiquitarianism/leonida/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22

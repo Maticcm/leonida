@@ -61,7 +61,7 @@ Leonida 是一个把 Xbox Series 版 Grand Theft Auto VI **静态重编译**到 
 2. **带子模块**克隆仓库：
 
    ```powershell
-   git clone --recursive https://github.com/ItsNotRexed/Leonida
+   git clone --recursive https://github.com/ubiquitarianism/leonida
    ```
 
    用 GitHub 的 “Download ZIP” 下载会缺少 `third_party/rpf9-explorer`：装了 `git` 时构建会自动获取，否则会告诉你该怎么做。

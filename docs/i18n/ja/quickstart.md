@@ -57,7 +57,7 @@ RDNA2 GPU プログラムは Vulkan 向けの SPIR-V に翻訳され、モデル
 2. サブモジュール込みでリポジトリを取得します。
 
    ```powershell
-   git clone --recursive https://github.com/ItsNotRexed/Leonida
+   git clone --recursive https://github.com/ubiquitarianism/leonida
    ```
 
    GitHub の "Download ZIP" では `third_party/rpf9-explorer` が含まれません。`git` があればビルドが自動で
