@@ -47,6 +47,12 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.strip()
 
+    def require_write_tree(self):
+        """Skip on a git without `merge-tree --write-tree` (older than 2.38), which the checker needs."""
+        usage = subprocess.run(["git", "merge-tree", "-h"], capture_output=True, encoding="utf-8", errors="replace")
+        if "--write-tree" not in usage.stdout + usage.stderr:
+            self.skipTest("needs git 2.38 or newer (merge-tree --write-tree)")
+
     def write(self, path, text):
         full = os.path.join(self.repo, path)
         os.makedirs(os.path.dirname(full), exist_ok=True)
@@ -91,6 +97,7 @@ class MergeCheckTest(unittest.TestCase):
         return code, out.getvalue()
 
     def test_a_fresh_pr_is_clean(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.pr_branch("fresh", base, "\n" + PARAGRAPH)
         code, [r] = self.run_check("12=fresh")
@@ -100,6 +107,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r["commits"], {"total": 1, "on_main": 0})
 
     def test_a_rebased_copy_of_a_merged_pr_is_already_merged_and_would_duplicate(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.pr_branch("first", base, "\n" + PARAGRAPH)
         self.merge(7, "first")
@@ -124,6 +132,7 @@ class MergeCheckTest(unittest.TestCase):
                          {10: [], 11: [sha[:12]]})
 
     def test_batch_keeps_prior_merges_separate(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.pr_branch("landed", base, PARAGRAPH)
         self.merge(31, "landed")
@@ -138,6 +147,7 @@ class MergeCheckTest(unittest.TestCase):
                          [(32, "clean", []), (31, "already-merged", [merged_sha]), (32, "clean", [])])
 
     def test_text_already_on_main_is_reported_even_when_the_patch_differs(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.pr_branch("first", base, "\n" + PARAGRAPH)
         self.merge(8, "first")
@@ -154,6 +164,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r["duplicates"], {"docs/notes.md": 3})
 
     def test_duplicate_check_reports_failed_blob_reads(self):
+        self.require_write_tree()
         self.append("docs/notes.md", "\n" + PARAGRAPH)
         self.commit("Existing paragraph")
         self.pr_branch("repeat", "main", "\n" + PARAGRAPH)
@@ -177,6 +188,7 @@ class MergeCheckTest(unittest.TestCase):
                 self.assertEqual(err.getvalue(), f"merge_check: git {' '.join(read)}: fatal: could not read blob\n")
 
     def test_a_new_path_is_clean(self):
+        self.require_write_tree()
         self.append("docs/notes.md", "\n" + PARAGRAPH)
         self.commit("Existing paragraph")
         self.git("checkout", "-q", "-b", "new-path")
@@ -188,6 +200,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual((code, result["verdict"], result["duplicates"]), (0, "clean", {}))
 
     def test_a_gitlink_update_needs_no_submodule_objects(self):
+        self.require_write_tree()
         path = "deps/sample"
         oid_length = len(self.git("rev-parse", "main"))
         for digit, branch in (("1", "main"), ("2", "updated")):
@@ -202,6 +215,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual((code, result["verdict"], result["duplicates"]), (0, "clean", {}))
 
     def test_patch_paths_and_added_header_like_lines_still_count_duplicates(self):
+        self.require_write_tree()
         paths = ("docs/quoted \u65e5\u672c\u8a9e.md", "docs/notes with spaces.md", "docs/header-like.md")
         header_like = "++ " + PARAGRAPH
         introduction = "A separator between copies keeps Git's added hunk easy to identify.\n"
@@ -224,6 +238,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(self.run_check("18=duplicated"), (code, [result]))
 
     def test_duplicate_blocks_span_retained_blank_lines_only(self):
+        self.require_write_tree()
         first, second, third = PARAGRAPH.splitlines(keepends=True)
         paragraph = first + "\n" + second + third
         intro = paragraph + "Start of the changed section.\n"
@@ -247,6 +262,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(result["duplicate_samples"], {duplicate: PARAGRAPH.splitlines()})
 
     def test_duplicate_blocks_use_git_line_boundaries(self):
+        self.require_write_tree()
         unicode_lines = "".join(f"Paragraph {i} begins with enough text to count as a line.\u2028"
                                 "Its continuation is also longer than forty characters.\n" for i in range(3))
         bare_cr_lines = unicode_lines.replace("\u2028", "\r")
@@ -265,6 +281,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual((code, result["duplicates"]), (1, dict.fromkeys(paths, 3)))
 
     def test_a_block_the_pr_moves_is_not_a_duplicate(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.pr_branch("first", base, "\n" + PARAGRAPH)
         self.merge(16, "first")
@@ -278,6 +295,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual((code, r["verdict"], r["duplicates"]), (0, "clean", {}))
 
     def test_a_new_commit_after_the_merge_is_not_already_merged(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.pr_branch("first", base, "\n" + PARAGRAPH)
         self.merge(10, "first")
@@ -291,6 +309,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r["commits"], {"total": 1, "on_main": 0})
 
     def test_one_or_two_repeated_lines_are_not_reported(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.pr_branch("first", base, "\nself.assertEqual(result.returncode, 0, result.stdout + result.stderr)\n")
         self.merge(14, "first")
@@ -302,6 +321,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual((code, r["duplicates"]), (0, {}))
 
     def test_short_lines_are_not_counted(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.pr_branch("fence", base, "\n```\n---\n```\n")
         self.merge(11, "fence")
@@ -314,6 +334,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_a_squash_merged_single_commit_pr_is_already_merged(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.pr_branch("sq1", base, "\n" + PARAGRAPH)
         self.squash_merge(21, "sq1")
@@ -330,6 +351,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r["commits"], {"total": 1, "on_main": 1})
 
     def test_a_multi_commit_squash_merged_pr_is_already_merged_despite_cherry_miss(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.git("checkout", "-q", "-b", "sq2", base)
         lines = PARAGRAPH.splitlines(keepends=True)
@@ -361,6 +383,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r_issue["merges"], [])
 
     def test_a_follow_up_commit_after_a_multi_commit_squash_merge_is_clean(self):
+        self.require_write_tree()
         base = self.git("rev-parse", "main")
         self.git("checkout", "-q", "-b", "sq3", base)
         lines = PARAGRAPH.splitlines(keepends=True)
@@ -381,6 +404,7 @@ class MergeCheckTest(unittest.TestCase):
         self.assertEqual(r["commits"], {"total": 3, "on_main": 0})
 
     def test_a_revert_commit_is_not_counted_as_a_prior_merge(self):
+        self.require_write_tree()
         self.write("docs/other.md", "unrelated\n")
         self.commit('Revert "pr: something (#24)"')
         self.write("docs/other2.md", "unrelated2\n")
