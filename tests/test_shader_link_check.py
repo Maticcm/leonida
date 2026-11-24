@@ -570,6 +570,24 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(reflect.call_count, 2)
 
+class PublishTest(unittest.TestCase):
+    def test_write_report_publishes_json_and_cleans_temp_on_failure(self):
+        payload = {"pipelines": [{"name": "synthetic-pair", "status": "compatible"}]}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "nested" / "report.json"
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+
+            link.write_report(report_path, payload)
+            self.assertTrue(report_path.is_file())
+            self.assertEqual(json.loads(report_path.read_text(encoding="utf-8")), payload)
+            leftover_temps = list(report_path.parent.glob(".shader-link-*.tmp"))
+            self.assertEqual(leftover_temps, [])
+
+            with patch.object(link.os, "replace", side_effect=OSError("simulated replace failure")):
+                with self.assertRaises(OSError):
+                    link.write_report(report_path, {"pipelines": []})
+            self.assertEqual(list(report_path.parent.glob(".shader-link-*.tmp")), [])
+            self.assertEqual(json.loads(report_path.read_text(encoding="utf-8")), payload)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
