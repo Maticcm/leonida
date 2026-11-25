@@ -133,6 +133,6 @@ python -I make_game.py --wave64-emulate off            # auto（既定）、on�
 ## コントリビュートと GPU テスト
 
 - GPU テストの手順（ゲームファイル不要）: [docs/testing.md](../../testing.md)。結果は
-  [#166](https://github.com/ItsNotRexed/Leonida/issues/166) に、GPU とドライバーごとに 1 コメントで投稿します。
+  [gpu-test-results/](../../../gpu-test-results) にファイルを追加する pull request で、GPU とドライバーごとに 1 ファイルで投稿します。
 - コントリビュートのルール、ゲームデータを持ち込まない方針、作業の調整:
   [`CONTRIBUTING.md`](../../../CONTRIBUTING.md)。

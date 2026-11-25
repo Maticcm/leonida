@@ -37,8 +37,8 @@ Rien n'est jouable, sur aucune plateforme. Ce qui tourne aujourd'hui :
 - **AMD RDNA1 (RX 5000)** : une cible prise en charge, proche du RDNA2 de la console ; ses sous-groupes de 64
   exécutent les shaders wave64 nativement.
 
-Les résultats GPU de toutes les plateformes sont regroupés dans
-l'[issue #166](https://github.com/ItsNotRexed/Leonida/issues/166).
+Les résultats GPU de toutes les plateformes sont envoyés sous forme de pull requests ajoutant un fichier à
+[gpu-test-results/](../../../gpu-test-results).
 
 ## Prérequis
 
@@ -177,7 +177,7 @@ encore ce cache.
    [`CONTRIBUTING.md`](../../../CONTRIBUTING.md).
 
 Le [guide des tests GPU](../../testing.md) explique comment lancer les tests sans aucun fichier du jeu. Publiez vos
-résultats dans l'[issue #166](https://github.com/ItsNotRexed/Leonida/issues/166), un commentaire par GPU et par
-pilote.
+résultats sous forme de pull request ajoutant un fichier à [gpu-test-results/](../../../gpu-test-results), un
+fichier par GPU et par pilote.
 
 [coord]: https://github.com/ubiquitarianism/leonida/issues?q=is%3Aissue%20is%3Aopen%20in%3Atitle%20%22Coordinating%20who%20works%20on%20what%22
