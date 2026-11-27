@@ -356,12 +356,16 @@ counts the same way: input on XInput is then PlayStation input.
 **Active input.** `gameinput::active_family()` (`leonida-hle`, readable from any thread, lock-free) says which kind of
 device was used last: `Family::Xbox`, `Family::PlayStation` or `Family::KeyboardMouse`; `family_generation()` goes up by one
 with each change. It follows the rules of [Active input](#active-input) above (an edge counts, the first reading of a
-device is its baseline, a change waits `LEONIDA_PROMPTS_SWITCH_MS` = 300 ms), with the keyboard and mouse as a third
-family (a key going down, or mouse look pushing the stick past 0.35). Before the first input it is PlayStation if a Sony pad is
-present and Xbox otherwise. One line is logged on each change (`input in use: PlayStation (Sony pad input)`).
-`LEONIDA_PROMPTS=xbox|playstation|keyboard|auto` forces it. The button prompts follow it: see
-[prompt_glyphs.md](prompt_glyphs.md). Unit-tested on hand-made report bytes and the family rules; not run against a
-real pad yet.
+device is its baseline), with the keyboard and mouse as a third family (a key going down, or mouse look pushing the
+stick past 0.35). A switch is immediate: the first deliberate input of another family changes the answer, however long
+the one before was in use; only the change after that one waits, `LEONIDA_PROMPTS_SWITCH_MS` = 300 ms from the switch,
+so two devices used at once change it at most about three times a second. Before the first input it is what is
+connected when the runtime first looks: PlayStation with a Sony pad, Xbox with any other pad, the keyboard and mouse
+with no pad at all (a wireless pad still asleep counts as none: `LEONIDA_PROMPTS=xbox` is the way round it). One line
+is logged on each change (`input in use: PlayStation (Sony pad input)`).
+`LEONIDA_PROMPTS=xbox|playstation|keyboard|auto` forces it. The button prompts follow it at the title's one read of its
+glyph movie: see [prompt_glyphs.md](prompt_glyphs.md). Unit-tested on hand-made report bytes and the family rules; not
+run against a real pad yet.
 
 ## Rumble and triggers
 
