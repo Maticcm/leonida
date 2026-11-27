@@ -66,7 +66,7 @@ impl Placed {
     /// (`super::placed_is_titles`): the destination by what has landed there, and the source either not
     /// declared or the title's by the rule for fills (`super::fill_is_titles`).
     pub(super) fn titles(&self, written: &[(usize, usize)]) -> bool {
-        super::placed_is_titles(self.dst, self.len)
+        super::placed_is_titles(self.dst, self.len, touches(written, self.dst, self.dst + self.len))
             && (!touches(written, self.src, self.src + self.len) || super::fill_is_titles(self.src, self.len))
     }
 
@@ -75,7 +75,7 @@ impl Placed {
     pub(super) fn why_waits(&self, written: &[(usize, usize)]) -> &'static str {
         let source = touches(written, self.src, self.src + self.len);
         let declared = touches(written, self.dst, self.dst + self.len);
-        let dst = super::placed_is_titles(self.dst, self.len);
+        let dst = super::placed_is_titles(self.dst, self.len, declared);
         let src = !source || super::fill_is_titles(self.src, self.len);
         match (dst, src, declared) {
             (false, false, _) => "(a shader's write went into its destination lately, and into its source)",

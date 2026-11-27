@@ -3327,14 +3327,22 @@ fn fill_is_titles(src: usize, len: usize) -> bool {
 /// What can go wrong: a flight in the air whose shader does write those bytes, for the first time in 600
 /// frames, lands after the copy was taken: title memory holds its bytes, not the copy's, until this
 /// submission lands (the card has them in the right order all along).
-fn placed_is_titles(dst: usize, len: usize) -> bool {
+///
+/// `declared`: whether a flight in the air declares the destination at all. Where none does, nothing in the air
+/// can write it, whatever landed there before: the copy is the title's own as far as the destination goes, and
+/// only its source is in question (`place::Placed::titles`). The title's ring is such a place: a shader's small
+/// buffer was there some frames ago, so "lately" always said yes, and three copies of 0xd0 to 0x230 bytes a
+/// frame each waited for every flight, 45 to 60 ms of the submitting thread's 105 ms a frame; the wait's own
+/// line said "a shader's write went into its destination, which no flight declares, lately" for 1,042 of
+/// 1,098 of them (2026-11-27). `LEONIDA_PLACED_UNDECLARED=0`: asked of every destination, as before.
+fn placed_is_titles(dst: usize, len: usize, declared: bool) -> bool {
     const SMALL: usize = 64 << 10;
     static ON: OnceLock<bool> = OnceLock::new();
     let on = *ON.get_or_init(|| std::env::var_os("LEONIDA_PLACED_TITLE").is_some_and(|v| v == "1"));
     // `LEONIDA_AB=<s>,LEONIDA_PLACED_TITLE` turns it on and off by turns in one run.
     #[cfg(feature = "diagnostics")]
     let on = crate::ab::pick("LEONIDA_PLACED_TITLE").unwrap_or(on);
-    on && len <= SMALL && !landed_lately(dst, len)
+    on && len <= SMALL && (!declared && crate::toggled!("LEONIDA_PLACED_UNDECLARED") || !landed_lately(dst, len))
 }
 
 /// Diagnostics: the waits for flights, by what waited, why it was not done
