@@ -78,17 +78,6 @@ def repo_version(repo: str = REPO) -> str:
     return _quiet_run(["git", "-C", repo, "rev-parse", "--short", "HEAD"]).strip() or "(no git here)"
 
 
-def repo_changes(repo: str = REPO, count: int = 5) -> list[dict]:
-    """The newest commits as {date, subject}: the page's "Latest changes"."""
-    out = _quiet_run(["git", "-C", repo, "log", "-n", str(count), "--no-merges", "--format=%cs%x09%s"])
-    rows = []
-    for line in out.splitlines():
-        date, tab, subject = line.partition("\t")
-        if tab:
-            rows.append({"date": date, "subject": subject})
-    return rows
-
-
 def package_version(repo: str = REPO) -> str:
     """The package the repository's manifest is for: game/xbox-<version>.json."""
     names = sorted(glob.glob(os.path.join(repo, "game", "xbox-*.json")))
@@ -192,7 +181,6 @@ class Launcher:
         self.listeners: list[queue.Queue] = []
         self.capture_paths: list[str] = []
         self.version = repo_version(repo)
-        self.changes = repo_changes(repo)
         self.package = package_version(repo)
         self.last_seen = time.monotonic()
 
@@ -300,7 +288,7 @@ class Launcher:
                      for m in mods],
             "mod_errors": errors, "mods_dir": mods_dir, "saves": self.saves(settings), "captures": captures,
             "hero": self.hero(settings, captures), "background": self.background(settings),
-            "changes": self.changes, "job": job, "log": log,
+            "job": job, "log": log,
         }
 
     # ---- the stream of output and state

@@ -73,8 +73,8 @@ the newest-picture search.
 
 ## The HTML launcher (`launcher/`, in progress)
 
-`launcher/index.html` is a second front end in the layout of a publisher's game launcher (a slim rail of tiles, a
-picture over the whole window, the sections top right, the logo with a large PLAY button, a row of cards), and
+`launcher/index.html` is a second front end in the layout of a publisher's game launcher (a slim rail with the
+game's tile, a picture over the whole window, the sections top right, the logo with a large PLAY button), and
 `launcher/serve.py` the small server behind it. `python -I launcher/serve.py` serves it on 127.0.0.1 only and opens
 it in a window of its own (Edge or Chrome in app mode, else the default browser). `--no-run` only looks: PLAY and the
 tools print the command they would run. `Launcher.bat` still opens the Tkinter window above.

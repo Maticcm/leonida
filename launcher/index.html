@@ -9,7 +9,7 @@
 <style>
 /* Layout, after the usual shape of a publisher's game launcher: a slim black rail of square tiles with a selection
    bar, picture art over the whole window, the sections as uppercase words top right, the logo with one big light
-   button and a small menu button under it, and a row of black cards. The other pages are a dark sheet over the art.
+   button and a small menu button beside it. The other pages are a dark sheet over the art.
    The page loads nothing from the network: system fonts, the repository's assets/logo.svg, and the background
    picture the server keeps on this PC (else art drawn here). */
 :root {
@@ -47,20 +47,19 @@ a { color: inherit; }
 .rail .logo { display: flex; align-items: center; gap: 14px; height: 56px; padding-left: 24px; margin-bottom: 60px; text-decoration: none; }
 .rail .logo img, .rail .logo svg { width: 56px; height: 56px; flex: none; object-fit: contain; }
 .rail .logo b { font: 900 21px/1 var(--font-heavy); letter-spacing: .04em; display: none; }
-.lib { display: grid; gap: 18px; }
-.lib button { position: relative; display: flex; align-items: center; gap: 14px; height: 32px; padding: 0 12px 0 36px; background: none; border: 0;
-              cursor: pointer; text-align: left; min-width: 0; }
-.lib button::before { content: ""; position: absolute; left: 2px; top: -1px; bottom: -1px; width: 3px; border-radius: 2px; }
-.lib button[aria-pressed="true"]::before { background: var(--accent); }
-.lib .tile { width: 32px; height: 32px; flex: none; border-radius: 5px; display: grid; place-items: center; background: #1d1d20; color: #fff;
-             box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .16); font: 800 12.5px/1 var(--font); letter-spacing: .01em; }
-.lib .tile .ic { width: 18px; height: 18px; }
-.lib button:hover .tile { background: #303035; }
-.lib button[aria-pressed="true"] .tile { background: #fff; color: #000; box-shadow: none; }
+.lib { display: grid; }
+.lib .game { position: relative; display: flex; align-items: center; gap: 14px; height: 36px; padding: 0 12px 0 34px; text-decoration: none; min-width: 0; }
+.lib .game::before { content: ""; position: absolute; left: 2px; top: -2px; bottom: -2px; width: 3px; border-radius: 2px; background: var(--accent); }
+.lib .tile { width: 36px; height: 36px; flex: none; border-radius: 5px; display: grid; place-items: center; overflow: hidden;
+             background: #1d1d20 50% 50% / cover no-repeat; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .14); }
+.lib .tile img, .lib .tile svg { width: 27px; height: 27px; object-fit: contain; }
+/* a square cut from the upper middle of the background picture */
+.lib .tile.picture { background-size: auto 200%; background-position: 62% 8%; box-shadow: none; }
+.lib .tile.picture img, .lib .tile.picture svg { display: none; }
+.lib .game:hover .tile { filter: brightness(1.15); }
 .lib .name { display: none; min-width: 0; }
 .lib .name b { display: block; font-weight: 600; font-size: 13.5px; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lib .name small { display: block; color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.lib .dots { height: 6px; margin-left: 41px; width: 22px; background: radial-gradient(circle, #55555c 1.6px, transparent 2px) 0 50% / 8px 6px repeat-x; }
 .app[data-rail="wide"] .rail .logo b, .app[data-rail="wide"] .lib .name { display: block; }
 .rail-toggle { margin: auto 0 0 36px; width: 32px; height: 32px; display: grid; place-items: center; background: none; border: 0; color: #8b8b93; cursor: pointer; }
 .rail-toggle:hover { color: #fff; }
@@ -93,10 +92,6 @@ main[data-tone="dark"] .top nav a:hover, main[data-tone="dark"] .top nav a[aria-
 
 /* ---- Play ---- */
 #page-play { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 12px; padding: 40px 0 70px var(--pad); align-items: start; }
-/* Over a picture the cards sit along the bottom, so the faces in it stay clear. */
-main[data-art="picture"] #page-play { min-height: 100%; grid-template-rows: minmax(0, 1fr); padding-bottom: 54px; }
-main[data-art="picture"] .carousel { align-self: end; }
-main[data-art="picture"] .card { flex-basis: clamp(250px, 29vw - 40px, 360px); }
 .title { display: grid; justify-items: start; gap: 4px; min-width: 0; }
 .biglogo { width: 236px; height: 150px; object-fit: contain; object-position: left center; filter: drop-shadow(0 5px 12px rgba(20, 6, 30, .4)); margin-left: -6px; }
 .wordmark { margin: -6px 0 0; font: 900 50px/1 var(--font-heavy); letter-spacing: .015em; text-transform: uppercase; color: #fff;
@@ -112,10 +107,16 @@ main[data-art="picture"] .card { flex-basis: clamp(250px, 29vw - 40px, 360px); }
 .play:hover, .kebab:hover { background: linear-gradient(180deg, #fff 0%, #f1f1f1 46%, #d8d8d8 100%); }
 .play:active, .kebab:active { transform: translateY(1px); }
 .play.is-stop { color: #b3261e; }
-.menu { position: absolute; left: 4px; top: 76px; z-index: 5; min-width: 250px; padding: 6px; border-radius: 8px; background: #111113; border: 1px solid #34343a;
+.menu { position: absolute; left: calc(100% + 10px); bottom: 4px; z-index: 5; width: 270px; padding: 6px; border-radius: 8px; background: #111113; border: 1px solid #34343a;
         box-shadow: 0 18px 40px rgba(0, 0, 0, .55); display: grid; }
-.menu button { text-align: left; background: none; border: 0; border-radius: 5px; padding: 9px 12px; cursor: pointer; font-size: 13.5px; }
+.menu button { text-align: left; background: none; border: 0; border-radius: 5px; padding: 7px 12px; cursor: pointer; font-size: 13.5px; }
 .menu button:hover { background: #26262b; }
+.menu .head { font: 700 11px/1 var(--font); letter-spacing: .14em; text-transform: uppercase; color: var(--faint); padding: 9px 12px 5px; }
+.menu .setup { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.menu .setup::before { content: ""; color: var(--accent); font-weight: 700; }
+.menu .setup[aria-checked="true"]::before { content: "\2713"; }
+.menu .setup b { font-weight: 600; }
+.menu hr { border: 0; border-top: 1px solid #34343a; margin: 6px 4px; }
 .status { margin: 16px 0 0 -4px; max-width: 300px; padding: 8px 12px; border-radius: 6px; background: rgba(11, 11, 13, .8); font-size: 12.5px; line-height: 1.4; display: grid; gap: 6px; }
 .status b { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; }
 .status b::before { content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none; background: #6fdc8c; }
@@ -123,22 +124,9 @@ main[data-art="picture"] .card { flex-basis: clamp(250px, 29vw - 40px, 360px); }
 .status[data-tone="run"] b::before { animation: pulse 1.2s ease-in-out infinite; }
 .status[data-tone="bad"] b::before { background: var(--bad); }
 .status span { color: #c9c9d0; overflow-wrap: anywhere; }
+.status a { color: var(--warn); overflow-wrap: anywhere; }
 .status .row { display: flex; gap: 8px; }
 @keyframes pulse { 50% { opacity: .3; } }
-
-.carousel { position: relative; min-width: 0; }
-.track { display: flex; gap: 24px; overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: none; padding: 0 var(--pad) 10px 0; }
-.track::-webkit-scrollbar { display: none; }
-.card { flex: 0 0 clamp(290px, 37vw - 41px, 434px); min-width: 0; overflow: hidden; background: #000; padding: 8px 8px 0; scroll-snap-align: start; color: #fff; text-decoration: none; display: block; position: relative; }
-.card .pic { display: block; width: 100%; aspect-ratio: 420 / 232; object-fit: cover; background: #17171a; }
-.card .cap { padding: 13px 6px 15px; font: 700 12.5px/1.3 var(--font); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.card .tag { position: absolute; left: 14px; top: 14px; padding: 4px 7px; font: 700 10px/1 var(--font); letter-spacing: .1em; text-transform: uppercase; background: rgba(0, 0, 0, .78); color: #fff; }
-.card .tag.todo { background: var(--warn); color: #201400; }
-a.card:hover .cap { text-decoration: underline; }
-.arrow { position: absolute; top: calc(50% - 26px); right: 0; width: 36px; height: 40px; border: 0; background: rgba(12, 12, 14, .94); color: #fff; cursor: pointer; display: grid; place-items: center; z-index: 2; }
-.arrow.back { right: auto; left: -18px; }
-.arrow .ic { width: 22px; height: 22px; stroke-width: 2.6; }
-.arrow.back .ic { transform: scaleX(-1); }
 
 /* ---- the log, a drawer along the bottom ---- */
 .logchip { position: absolute; left: 20px; bottom: 16px; z-index: 4; max-width: min(560px, calc(100% - 40px)); display: flex; align-items: center; gap: 10px; padding: 7px 12px;
@@ -232,12 +220,12 @@ h2.label { font: 700 12px/1 var(--font); letter-spacing: .16em; text-transform: 
   :root { --pad: 28px; }
   .app, .app[data-rail="wide"] { grid-template-columns: 76px minmax(0, 1fr); }
   .rail .logo { padding-left: 14px; } .rail .logo img, .rail .logo svg { width: 48px; height: 48px; }
-  .lib button { padding-left: 22px; } .lib .dots { margin-left: 27px; } .rail-toggle { display: none; }
+  .lib .game { padding-left: 20px; } .rail-toggle { display: none; }
   .app[data-rail="wide"] .rail .logo b, .app[data-rail="wide"] .lib .name { display: none; }
   .top { justify-content: flex-start; height: 96px; gap: 20px; } .top nav { gap: 22px; flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; } .top nav a { font-size: 14px; }
   .scroll { top: 96px; }
   #page-play { grid-template-columns: minmax(0, 1fr); gap: 34px; padding-top: 16px; }
-  .card { flex-basis: clamp(260px, 78%, 434px); }
+  .menu { left: 4px; bottom: auto; top: 76px; }
   .field { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
@@ -248,8 +236,6 @@ h2.label { font: 700 12px/1 var(--font); letter-spacing: .16em; text-transform: 
   <!-- shown only when assets/logo.svg cannot be loaded -->
   <symbol id="mark" viewBox="0 0 32 32"><path d="M5 3h7v19h15v7H5z" fill="#fa5776"/><path d="M15 19.5a6 6 0 0 1 12 0z" fill="#fc9a4f"/></symbol>
   <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15"/><path d="M13.5 4.5v15M7 9.5l3 2.5-3 2.5"/></symbol>
-  <symbol id="i-next" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
-  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></symbol>
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6h6l2 2h10v11H3z"/></symbol>
   <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="1.5"/><path d="M16 8V4H4v12h4"/></symbol>
   <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
@@ -258,7 +244,12 @@ h2.label { font: 700 12px/1 var(--font); letter-spacing: .16em; text-transform: 
 <div class="app" id="app" data-rail="narrow">
   <aside class="rail">
     <a class="logo" href="#play" aria-label="Leonida"><img data-logo src="../assets/logo.svg" alt=""><b>LEONIDA</b></a>
-    <div class="lib" id="lib" aria-label="Setups"></div>
+    <nav class="lib" aria-label="Library">
+      <a class="game" href="#play" aria-current="page" title="Leonida">
+        <span class="tile" id="game-tile"><img data-logo src="../assets/logo.svg" alt=""></span>
+        <span class="name"><b>Leonida</b><small id="game-state">Ready</small></span>
+      </a>
+    </nav>
     <button class="rail-toggle" type="button" id="rail-toggle" aria-label="Show or hide the names" title="Show or hide the names"><svg class="ic" aria-hidden="true"><use href="#i-panel"/></svg></button>
   </aside>
 
@@ -284,18 +275,14 @@ h2.label { font: 700 12px/1 var(--font); letter-spacing: .16em; text-transform: 
             <button class="play" type="button" id="play">Play</button>
             <button class="kebab" type="button" id="kebab" aria-label="More for this start" aria-haspopup="menu" aria-expanded="false"><i></i></button>
             <div class="menu" id="menu" role="menu" hidden>
-              <button type="button" role="menuitem" data-menu="settings">Options for this start</button>
+              <div class="head">Setup</div>
+              <div id="menu-setups"></div>
+              <hr>
               <button type="button" role="menuitem" data-menu="check">Check this start, without starting it</button>
               <button type="button" role="menuitem" data-menu="copy">Copy the command</button>
-              <button type="button" role="menuitem" data-menu="log">Show the log</button>
             </div>
           </div>
           <div class="status" id="status" role="status"><b></b><span></span></div>
-        </div>
-        <div class="carousel">
-          <div class="track" id="track"></div>
-          <button class="arrow back" type="button" id="prev" aria-label="Earlier cards" hidden><svg class="ic" aria-hidden="true"><use href="#i-next"/></svg></button>
-          <button class="arrow" type="button" id="next" aria-label="More cards"><svg class="ic" aria-hidden="true"><use href="#i-next"/></svg></button>
         </div>
       </section>
 
@@ -472,12 +459,12 @@ const GROUPS = [
     { key: "background", kind: "file", label: "Background picture", placeholder: "The key art, kept in %APPDATA%\\Leonida",
       help: "A picture of your own behind PLAY. Without one, the launcher fetches the game's key art from rockstargames.com once and keeps it in %APPDATA%\\Leonida. Pictures are never part of the repository." } ] },
 ];
-// The tiles of the rail: four setups of the one game, where a publisher's launcher lists its games.
+// Four ready setups, offered in the menu beside PLAY.
 const PRESETS = [
-  { glyph: "X", name: "Console picture", text: "Series X, 1440 lines, the game's upscaler", console: "x", set: { dlss: true, dlss_mode: "", frame_gen: 0, resolution: "" } },
-  { glyph: "DL", name: "DLSS Quality", text: "1440 lines rendered, DLSS makes the 2160", console: "x", set: { dlss: true, dlss_mode: "quality", frame_gen: 0, resolution: "" } },
-  { glyph: "2x", name: "Generated frames", text: "DLSS Quality, twice the frames shown", console: "x", set: { dlss: true, dlss_mode: "quality", frame_gen: 2, resolution: "" } },
-  { glyph: "S", name: "Lighter", text: "Series S: the game's 720p, taken to 1080p", console: "s", set: { dlss: true, dlss_mode: "", frame_gen: 0, resolution: "" } },
+  { name: "Console picture", text: "Series X, 1440 lines, the game's upscaler", console: "x", set: { dlss: true, dlss_mode: "", frame_gen: 0, resolution: "" } },
+  { name: "DLSS Quality", text: "1440 lines rendered, DLSS makes the 2160", console: "x", set: { dlss: true, dlss_mode: "quality", frame_gen: 0, resolution: "" } },
+  { name: "Generated frames", text: "DLSS Quality, twice the frames shown", console: "x", set: { dlss: true, dlss_mode: "quality", frame_gen: 2, resolution: "" } },
+  { name: "Lighter", text: "Series S: the game's 720p, taken to 1080p", console: "s", set: { dlss: true, dlss_mode: "", frame_gen: 0, resolution: "" } },
 ];
 const MODE_NAMES = { quality: "Quality", balanced: "Balanced", performance: "Performance", ultra: "Ultra" };
 function consoleOf(s) { return s.series_s ? "s" : s.series_x ? "x" : (S && S.platform !== "windows" ? "s" : "x"); }   // each start script's own default
@@ -557,12 +544,6 @@ const SAMPLE = {
     { name: "Example story save", version: 4, size: 1482296, modified: 1795813200, blobs: 2 },
     { name: "Example profile", version: 12, size: 20776, modified: 1795809600, blobs: 2 } ] },
   captures: [], hero: null,
-  changes: [
-    { date: "2026-11-27", subject: "The title's UI and fullscreen resolution follow LEONIDA_OUTPUT" },
-    { date: "2026-11-27", subject: "The lighter title settings are opt-in; the profiler picks threads by their start too" },
-    { date: "2026-11-27", subject: "leonida-gpu: a thread of its own resets landed command lists and drops retired objects" },
-    { date: "2026-11-26", subject: "leonida-hle: the mouse buttons are the stand-in pad's triggers" },
-  ],
   job: { running: false, state: "Ready", kind: "" }, log: ["The launcher is ready."],
 };
 let S = null;
@@ -605,15 +586,12 @@ function renderPlay() {
     fill(st, h("b", null, "Stop the game?"), h("span", null, "It ends at once, with everything the start script began. Progress since the last save is lost."),
       h("div", { class: "row" }, h("button", { class: "btn danger", type: "button", onclick: () => { stopAsked = false; act("stop", {}); } }, "Stop it"),
         h("button", { class: "btn", type: "button", onclick: () => { stopAsked = false; renderPlay(); } }, "Keep playing")));
-  } else { stopAsked = false; fill(st, h("b", null, ready.label), h("span", null, ready.detail)); }
-  // the rail: the four setups, and a fifth tile when the options are none of them
-  const own = !PRESETS.some(p => presetOn(p, s));
-  fill($("lib"), PRESETS.map(p => h("button", { type: "button", "aria-pressed": String(presetOn(p, s)), title: p.name + ": " + p.text, onclick: () => change(Object.assign(consolePatch(p.console), p.set)) },
-      h("span", { class: "tile" }, p.glyph), h("span", { class: "name" }, h("b", null, p.name), h("small", null, p.text)))),
-    h("span", { class: "dots", "aria-hidden": "true" }),
-    h("button", { type: "button", "aria-pressed": String(own), title: "Your own setup: Settings", onclick: () => { location.hash = "#settings"; } },
-      h("span", { class: "tile" }, icon("sliders")), h("span", { class: "name" }, h("b", null, "Your own setup"), h("small", null, "Every option, in Settings"))));
-  renderCards(); chip();
+  } else {
+    stopAsked = false;
+    const todo = ready.tone === "ok" && S.checks.find(c => c.state !== "ok" && c.id !== "game");
+    fill(st, h("b", null, ready.label), h("span", null, ready.detail), todo ? h("a", { href: todo.go || "#tools" }, todo.title + ": " + todo.detail) : null);
+  }
+  renderSetups(s); renderRail(ready); chip();
   $("sample").hidden = !S.sample;
   $("logline").textContent = S.log.length ? S.log[S.log.length - 1] : "";
   const shot = $("shot"), main = $("main");
@@ -625,26 +603,21 @@ function renderPlay() {
   }
   tone();
 }
-// The cards: what still needs doing first, then your newest captures, then the repository's latest changes.
-const CARD_SKIES = ["dawn", "noon", "night", "dusk"];
-function renderCards() {
-  const cards = [];
-  for (const c of S.checks) if (c.state !== "ok") cards.push({ sky: "night", seed: 5, tag: "Before you play", todo: true, caption: c.title + ": " + c.detail, go: c.go });
-  S.captures.slice(0, 4).forEach(c => cards.push({ img: c.url, tag: "Your capture", caption: c.name + ", " + day(c.time), go: "#captures" }));
-  S.changes.forEach((c, i) => cards.push({ sky: CARD_SKIES[i % 4], seed: 11 + i * 17, tag: day(c.date), caption: c.subject }));
-  if (!cards.length) cards.push({ sky: "dusk", seed: 3, caption: "Everything is in place." });
-  const key = JSON.stringify(cards), track = $("track");
-  if (track.dataset.key === key) return;
-  track.dataset.key = key;
-  fill(track, cards.map(c => {
-    const pic = c.img ? h("img", { class: "pic", src: c.img, alt: "", loading: "lazy" }) : h("canvas", { class: "pic", "data-sky": c.sky, "data-seed": c.seed });
-    return h(c.go ? "a" : "article", { class: "card", href: c.go },
-      pic, c.tag ? h("span", { class: "tag" + (c.todo ? " todo" : "") }, c.tag) : null, h("div", { class: "cap", title: c.caption }, c.caption));
-  }));
-  paintCards(); arrows();
+// The menu beside PLAY: the four setups with the one in use ticked, and your own options when they are none of them.
+function renderSetups(s) {
+  const own = !PRESETS.some(p => presetOn(p, s));
+  fill($("menu-setups"), PRESETS.map(p => h("button", { class: "setup", type: "button", role: "menuitemradio", "aria-checked": String(presetOn(p, s)), title: p.text,
+      onclick: () => { menu(false); change(Object.assign(consolePatch(p.console), p.set)); } }, h("b", null, p.name))),
+    h("button", { class: "setup", type: "button", role: "menuitemradio", "aria-checked": String(own), title: "Every option, in Settings", onclick: () => { menu(false); location.hash = "#settings"; } },
+      h("b", null, "Your own options")));
 }
-function paintCards() { for (const cv of document.querySelectorAll("#track canvas")) paintScene(cv, cv.dataset.sky, Number(cv.dataset.seed), { sun: .3 + (Number(cv.dataset.seed) % 5) * .1 }); }
-function arrows() { const t = $("track"); $("prev").hidden = t.scrollLeft < 8; $("next").hidden = t.scrollLeft + t.clientWidth >= t.scrollWidth - 8; }
+// The rail: the one game of this library. Its tile is cut from the background picture when there is one.
+function renderRail(ready) {
+  const tile = $("game-tile"), art = !!(S.hero && S.hero.kind === "picture");
+  tile.classList.toggle("picture", art);
+  tile.style.backgroundImage = art ? 'url("' + S.hero.url + '")' : "";
+  $("game-state").textContent = ready.label;
+}
 function pressPlay() {
   if (S.job.running) { stopAsked = true; renderPlay(); return; }
   if (readiness().tone === "todo") { location.hash = "#settings"; toast("Choose the game folder first."); return; }
@@ -797,7 +770,6 @@ function route() {
   for (const a of document.querySelectorAll("#nav a")) a.getAttribute("href") === "#" + name ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current");
   $("main").dataset.page = name; $("scroll").scrollTop = 0; menu(false); tone(); chip();
   paintArt();
-  if (name === "play") { paintCards(); arrows(); }
 }
 function render() {
   $("build").textContent = "Leonida " + S.version + ", for package " + S.package + (S.can_run ? "." : S.sample ? ". Sample data." : ". Preview: nothing is started.");
@@ -815,23 +787,18 @@ document.addEventListener("click", e => {
   if (save) act("save", { action: save.dataset.save });
   if (item) {
     menu(false);
-    if (item.dataset.menu === "settings") location.hash = "#settings";
     if (item.dataset.menu === "copy") { const c = commandText(); c ? copyText(c, "The command is copied.") : toast("Choose the game folder first."); }
-    if (item.dataset.menu === "log") showLog(true);
     if (item.dataset.menu === "check") { if (S.sample) { logLines(["Sample view: the check runs the command with -DryRun.", "  " + localCommand(S.settings).concat("-DryRun").map(quote).join(" ")]); showLog(true); } else runTool("dry_run"); }
   } else if (!e.target.closest("#kebab")) menu(false);
 });
 $("play").addEventListener("click", pressPlay);
 $("kebab").addEventListener("click", () => menu($("menu").hidden));
 $("avatar").addEventListener("click", () => { location.hash = "#about"; });
-$("rail-toggle").addEventListener("click", () => { const app = $("app"); app.dataset.rail = app.dataset.rail === "wide" ? "narrow" : "wide"; setTimeout(() => { paintArt(); paintCards(); arrows(); }, 0); });
+$("rail-toggle").addEventListener("click", () => { const app = $("app"); app.dataset.rail = app.dataset.rail === "wide" ? "narrow" : "wide"; setTimeout(paintArt, 0); });
 $("logchip").addEventListener("click", () => showLog(true));
 $("log-close").addEventListener("click", () => showLog(false));
 $("log-copy").addEventListener("click", () => copyText(S.log.join("\n"), "The log is copied."));
 $("cmd-copy").addEventListener("click", () => { const c = commandText(); if (c) copyText(c, "The command is copied."); });
-$("next").addEventListener("click", () => $("track").scrollBy({ left: $("track").clientWidth * .8, behavior: "smooth" }));
-$("prev").addEventListener("click", () => $("track").scrollBy({ left: -$("track").clientWidth * .8, behavior: "smooth" }));
-$("track").addEventListener("scroll", arrows, { passive: true });
 $("shot").addEventListener("load", e => {   // how bright the capture is where the words sit
   const c = document.createElement("canvas"); c.width = 32; c.height = 18;
   const g = c.getContext("2d"); g.drawImage(e.target, 0, 0, 32, 18);
@@ -848,13 +815,10 @@ window.addEventListener("hashchange", route);
 
 // ---------------------------------------------------------------- the art
 // A flat picture in layers, drawn here from a fixed seed: a bay city in haze, water, a sandy bank with palms and
-// spiky plants. Four skies; the window uses the dusk one, the cards the others. No game art is involved, and it is
+// spiky plants. It stands in until there is a background picture, and it is
 // drawn once per size, so it costs nothing while the game runs.
 const SKIES = {
   dusk:  { sky: ["#e7a2bb", "#dca7cb", "#f6cbb3"], sun: "255,240,218", far: "#bb8fc6", mid: "#9a71b4", near: "#73509a", water: ["#efbcbb", "#c08db8"], ground: ["#d9946a", "#a9603f"], plant: "#3f1c3d", light: "255,226,180", lights: .1 },
-  dawn:  { sky: ["#f2b38c", "#f5c3a4", "#fbe4c3"], sun: "255,252,232", far: "#dcab9f", mid: "#bd8291", near: "#8d597a", water: ["#f8d6ae", "#dc9d92"], ground: ["#c98a5c", "#8f5637"], plant: "#3a1e2b", light: "255,244,210", lights: .05 },
-  noon:  { sky: ["#3fa7d2", "#84cbe0", "#dff3ea"], sun: "255,255,244", far: "#a3cfdb", mid: "#71acc3", near: "#3f81a1", water: ["#9fe0de", "#3d9db6"], ground: ["#ecd29c", "#c59a5c"], plant: "#153c38", light: "255,255,255", lights: 0 },
-  night: { sky: ["#0a0f2e", "#1d1c52", "#55306f"], sun: "232,238,255", far: "#2c2866", mid: "#1e1b4c", near: "#120f34", water: ["#30306e", "#0f0f2e"], ground: ["#1b1332", "#0c0818"], plant: "#05030d", light: "255,208,134", lights: .34 },
 };
 function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 function skyline(g, r, W, base, maxH, color, u, light, lights, big) {
@@ -942,7 +906,7 @@ function paintScene(cv, key, seed, o) {
 }
 function paintArt() { paintScene($("art"), "dusk", 20261127, { big: true, sun: .2 }); }
 let sizing = 0;
-window.addEventListener("resize", () => { clearTimeout(sizing); sizing = setTimeout(() => { paintArt(); paintCards(); arrows(); }, 120); });
+window.addEventListener("resize", () => { clearTimeout(sizing); sizing = setTimeout(paintArt, 120); });
 
 // ---------------------------------------------------------------- start
 (async function start() {
