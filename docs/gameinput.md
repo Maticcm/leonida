@@ -247,8 +247,10 @@ says "in a vehicle" is, in this order:
    - The global at `AB760C8h` is written by one function (`CA4DE0h`), which has three callers: one passes a
      vehicle (in a function of 129Fh bytes, taken to be where a ped is put in a vehicle), one passes null after
      testing that the ped's id is the player's (taken to be where a ped is taken out), and the function that sets
-     the player's ped passes what `4DD7510h` gives for the new ped. 167 places in the code read it; the vehicle
-     cheats read a type byte at `+FAh` of what it points at.
+     the player's ped passes what `4DD7510h` gives for the new ped. The first two are methods of that same column
+     `47h` record: the first begins by reading its `+10h` and `+898h` and testing bit `20h`, the second tests
+     other bits beside it (`+12h`). 167 places in the code read the global; the vehicle cheats read a type byte
+     at `+FAh` of what it points at.
    - Not known until it has run: that it is null in every on-foot state (after a crash through the windscreen, a
      vehicle that blows up, a cutscene), and when during getting in and out it changes compared with the title's own
      switch of its controls. The reader logs every change with its time, and warns when the ped moves at 12 m/s for
