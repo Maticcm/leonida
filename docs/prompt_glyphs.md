@@ -15,6 +15,7 @@ PlayStation glyphs. This note records the movie's format and which export is whi
 | tags | GFx exporter info (1000, library name `input_icons`), FileAttributes (69: ActionScript 3), background colour, frame label, 131 DefineShape3, 38 DefineSprite, ExportAssets (56), DoABC (82, 9,516 bytes, lazy-init name `frame1`), SymbolClass (76, 39 entries), ShowFrame, End |
 | symbols | 38 exports `platform_xbsx.input_icons.Main_Button_<N>` (N = 4..39, 58, 59), each a one-frame sprite of 2 to 5 vector shapes (no bitmaps); the SymbolClass binds each sprite to the class `platform_xbsx.input_icons:Main_Button_<N>` and one more entry, id 0, to the document class `Main` |
 | canvas | every sprite is 1280 x 1280 twips (64 x 64 px), registration at the top left; exceptions: N = 16 and 25 (4..1281 x 21..1265), 34 and 36 (the bumpers, about 1279 x 775 starting at y 252) and 35 and 37 (the triggers, x 31..1254) |
+| drawing | counted over all 131 shapes: 103 have one solid fill and no stroke, 28 one stroke and no fill; the fills are opaque white (41), black (55) and grey 103 (7, the unlit D-pad), every stroke is opaque black and 60 twips (3 px) wide; all 131 placements are PlaceObject2 with a translation only (no scale, rotation or colour transform) |
 
 The shared ActionScript builds the symbol name from `"platform_" + capabilities.toLowerCase()` and
 `.input_icons.Main_Button_<iconID>`; the executable also holds the format string `platform_xbsx.input_icons.Main_Button_%d`.
@@ -23,7 +24,17 @@ does not need them, only the export names and the class names.
 
 ## N to button
 
-Read from rendered sprites (our own rasteriser of the DefineShape3 records).
+Read from rendered sprites. `tools/xbox_prompt_glyphs.py` is the rasteriser of the DefineShape3 records:
+
+```powershell
+python -I tools/xbox_prompt_glyphs.py --from-archive "<package>/data.rpf" --out <folder outside the repository>
+```
+
+writes one PNG per export (named after it, the 64 x 64 canvas and a pixel around it at 4x), a contact sheet `sheet.png`
+and a listing `README.txt`. The pictures are the game's artwork: the tool refuses a folder inside the repository, and
+they are never committed. Some outlines leave the 64 x 64 canvas by up to 0.3 px (N = 6: x from -0.30), hence the
+margin. It stops with an error on anything it does not draw (gradient or bitmap fills, colour transforms, clip layers);
+this movie has none.
 
 | N | button | N | button |
 |---|---|---|---|
