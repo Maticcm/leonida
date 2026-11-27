@@ -70,6 +70,22 @@ impl Placed {
             && (!touches(written, self.src, self.src + self.len) || super::fill_is_titles(self.src, self.len))
     }
 
+    /// Diagnostics: why [`Placed::titles`] did not take the copy for the title's own, for the wait's name.
+    #[cfg(feature = "diagnostics")]
+    pub(super) fn why_waits(&self, written: &[(usize, usize)]) -> &'static str {
+        let source = touches(written, self.src, self.src + self.len);
+        let declared = touches(written, self.dst, self.dst + self.len);
+        let dst = super::placed_is_titles(self.dst, self.len);
+        let src = !source || super::fill_is_titles(self.src, self.len);
+        match (dst, src, declared) {
+            (false, false, _) => "(a shader's write went into its destination lately, and into its source)",
+            (false, true, true) => "(a shader's write went into its destination, which flights declare, lately)",
+            (false, true, false) => "(a shader's write went into its destination, which no flight declares, lately)",
+            (true, false, _) => "(a shader's write went into its source lately, and the title did not write that since)",
+            (true, true, _) => "(taken for the title's own by now)",
+        }
+    }
+
     /// Whether flights that write `written` are waited for.
     pub(super) fn waits(&self, written: &[(usize, usize)]) -> Waits {
         if self.titles(written) {

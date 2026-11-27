@@ -3252,6 +3252,33 @@ fn late_blocked(runs: &[&HostList]) -> Option<usize> {
     blocked_by(&written, runs, true).or_else(|| card_steps::copied_read(&copies, runs).then_some(WHY_READ))
 }
 
+/// Whether a shader's write went into `[at, at + len)` lately: into a 4 KiB page of them in the last 600
+/// frames, or with `LEONIDA_LANDED_EXACT=1` into those bytes, by cells of 8
+/// (`crate::watch::landed_lately_exact`: this span of 512 frames or the one before; `LEONIDA_AB` can name it).
+///
+/// Why the cells are kept: the title's constants lie beside a small buffer its shaders write (16 bytes apart at
+/// the save), and by pages they never are the title's own: three copies of 0xd0 to 0x230 bytes a frame each
+/// wait for every flight, 35 to 65 ms of the submitting thread's 110 ms a frame (2026-11-27).
+/// Off by default: in one run with the switch turned every 20 s the frame was no shorter with it (median
+/// 110.2 ms against 103.1 over 33 phases, while pipelines compiled and three builds ran beside the game), and
+/// the wait's own line named the copy's destination as written by a shader lately in both halves. A copy that
+/// waited is put into title memory by its landing, which is noted like a shader's write: once a destination
+/// is noted it stays so, whichever way the question is asked. That is the next thing to take apart.
+fn landed_lately(at: usize, len: usize) -> bool {
+    let exact = {
+        static ON: OnceLock<bool> = OnceLock::new();
+        let on = *ON.get_or_init(|| std::env::var_os("LEONIDA_LANDED_EXACT").is_some_and(|v| v == "1"));
+        #[cfg(feature = "diagnostics")]
+        let on = crate::ab::pick("LEONIDA_LANDED_EXACT").unwrap_or(on);
+        on
+    };
+    if exact {
+        crate::watch::landed_lately_exact(at, len)
+    } else {
+        crate::watch::landed_lately(at, len, 600)
+    }
+}
+
 /// Whether a small fill of upload memory, or copy of a title buffer, goes on without waiting for
 /// flights when the title itself wrote the memory since they were given it
 /// (`LEONIDA_FILL_TITLE=1`; off by default).
@@ -3278,7 +3305,7 @@ fn fill_is_titles(src: usize, len: usize) -> bool {
     // Leonida: `LEONIDA_AB=<s>,LEONIDA_FILL_TITLE` turns it on and off by turns in one run.
     #[cfg(feature = "diagnostics")]
     let on = crate::ab::pick("LEONIDA_FILL_TITLE").unwrap_or(on);
-    on && len <= SMALL && (crate::watch::written_since_taken(src, len) || !crate::watch::landed_lately(src, len, 600))
+    on && len <= SMALL && (crate::watch::written_since_taken(src, len) || !landed_lately(src, len))
 }
 
 /// Whether a copy at its place in a list ([`place`]) into bytes that flights in the air have declared
@@ -3307,7 +3334,7 @@ fn placed_is_titles(dst: usize, len: usize) -> bool {
     // `LEONIDA_AB=<s>,LEONIDA_PLACED_TITLE` turns it on and off by turns in one run.
     #[cfg(feature = "diagnostics")]
     let on = crate::ab::pick("LEONIDA_PLACED_TITLE").unwrap_or(on);
-    on && len <= SMALL && !crate::watch::landed_lately(dst, len, 600)
+    on && len <= SMALL && !landed_lately(dst, len)
 }
 
 /// Diagnostics: the waits for flights, by what waited, why it was not done
@@ -3458,6 +3485,9 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
     }
     // Destinations of copies at their place, if a step reads them.
     let mut placed: Vec<(usize, usize)> = Vec::new();
+    // Diagnostics: and why each was not taken for the title's own.
+    #[cfg(feature = "diagnostics")]
+    let mut placed_why: Vec<(usize, usize, &'static str)> = Vec::new();
     for list in runs {
         for step in &list.deferred().copies {
             match step {
@@ -3509,7 +3539,11 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                 Step::Run(_) => return Some(WHY_RUN),
                 Step::Placed(p) => match p.waits(written) {
                     place::Waits::No => {}
-                    place::Waits::ForReaders => placed.push((p.dst, p.dst + p.len)),
+                    place::Waits::ForReaders => {
+                        placed.push((p.dst, p.dst + p.len));
+                        #[cfg(feature = "diagnostics")]
+                        placed_why.push((p.dst, p.dst + p.len, p.why_waits(written)));
+                    }
                     place::Waits::Yes => {
                         if count {
                             LATE_STATS[15].fetch_add(1, Ordering::Relaxed);
@@ -3531,6 +3565,9 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
     // 2026-11-27).
     #[cfg(feature = "diagnostics")]
     if count {
+        if let Some(&(.., why)) = placed_why.iter().find(|w| w.0 < _at + _len && _at < w.1) {
+            refused(why);
+        }
         blame(_kind, written, _at, _len);
     }
     Some(WHY_READ)

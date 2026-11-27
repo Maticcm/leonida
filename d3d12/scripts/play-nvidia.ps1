@@ -432,8 +432,22 @@ if (-not $NoPrecompile) {
         & $leonida shaders $from | Where-Object { $_ -match 'shaders in the cache|do not translate' } |
             ForEach-Object { Write-Host "  $_" }
         Write-Host 'Precompiling the pipelines earlier runs drew with ...'
+        # The driver keeps what these processes compile in its own files, of at most its "Shader Cache Size" each
+        # (4 GB unless raised). A full one keeps nothing new: every start then compiles in the game again, at a
+        # frame every few seconds and with draws missing (2026-11-27, twice in a day of translator changes).
+        # Which files are this game's is told by which ones the precompile touches.
+        $dxCache = Join-Path $env:LOCALAPPDATA 'NVIDIA\DXCache'
+        $dxBefore = @{}
+        Get-ChildItem $dxCache -Filter '*.nvph' -ErrorAction SilentlyContinue | ForEach-Object { $dxBefore[$_.Name] = $_.LastWriteTimeUtc }
         & $leonida warm --used | Where-Object { $_ -match 'pipelines known|^\d+ of |made in' } |
             ForEach-Object { Write-Host "  $_" }
+        $dxFull = @(Get-ChildItem $dxCache -Filter '*.nvph' -ErrorAction SilentlyContinue | Where-Object {
+                $_.Length -ge 4GB -and $dxBefore[$_.Name] -ne $_.LastWriteTimeUtc })
+        if ($dxFull.Count) {
+            Write-Warning ("NVIDIA's shader cache for this game is full ($($dxFull[0].FullName), 4 GB): what was compiled just now " +
+                "is not kept, and the game will compile it again while it runs. Set 'Shader Cache Size' to Unlimited in the " +
+                "NVIDIA Control Panel (Manage 3D settings), or delete that file while the game is closed.")
+        }
     } finally {
         $ErrorActionPreference = $stopWas
         if ($null -eq $logWas) { Remove-Item Env:LEONIDA_LOG -ErrorAction SilentlyContinue } else { $env:LEONIDA_LOG = $logWas }
