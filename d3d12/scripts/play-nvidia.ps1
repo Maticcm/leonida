@@ -371,9 +371,19 @@ foreach ($k in $settings.Keys) { Set-Item "Env:$k" $settings[$k] }
 # With another output size than the console's (LEONIDA_OUTPUT), the title's settings file is told that size as its
 # UI and fullscreen resolution: left at 0x0 ("as the console") it lays the UI out for 3840x2160 and the weapon wheel
 # and menus come out half again too big in a 2560x1440 picture (2026-11-27).
-if (-not $DryRun -and $env:LEONIDA_DATA_DIR -and "$($settings.LEONIDA_OUTPUT)" -match '^(\d+)x(\d+)$') {
+# The data folder the title's settings file is in: the variable, else `data_dir` of leonida.toml beside the layer
+# (with only the file naming it, neither of the two writers below ran: 2026-11-27).
+$dataDir = $env:LEONIDA_DATA_DIR
+if (-not $dataDir) {
+    $tomlHere = Join-Path $root 'leonida.toml'
+    if ((Test-Path $tomlHere) -and ((Get-Content $tomlHere -Raw) -match "(?m)^\s*data_dir\s*=\s*['""]([^'""]+)['""]")) {
+        # (In a double-quoted TOML string a backslash is written twice.)
+        $dataDir = $Matches[1] -replace '\\\\', '\'
+    }
+}
+if (-not $DryRun -and $dataDir -and "$($settings.LEONIDA_OUTPUT)" -match '^(\d+)x(\d+)$') {
     $outW = $Matches[1]; $outH = $Matches[2]
-    Get-ChildItem (Join-Path $env:LEONIDA_DATA_DIR '*\storage\settings\settings.xml') -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem (Join-Path $dataDir '*\storage\settings\settings.xml') -ErrorAction SilentlyContinue | ForEach-Object {
         $file = $_.FullName
         $text = [IO.File]::ReadAllText($file)
         $new = $text
@@ -388,14 +398,14 @@ if (-not $DryRun -and $env:LEONIDA_DATA_DIR -and "$($settings.LEONIDA_OUTPUT)" -
     }
 }
 $titleGraphics = if ($settings.LEONIDA_TITLE_GRAPHICS) { "$($settings.LEONIDA_TITLE_GRAPHICS)" } else { 'keep' }
-if (-not $DryRun -and $titleGraphics -eq 'performance' -and $env:LEONIDA_DATA_DIR) {
+if (-not $DryRun -and $titleGraphics -eq 'performance' -and $dataDir) {
     $lighter = [ordered]@{
         rtDynamicShadows = 'false'; rtLODLightShadows = 'false'; ssroSampleCount = '0'; motionBlur = 'false'
         shadowParticleShadows = 'false'; sharpenEnabled = 'false'; grassLod = '0.300000'; lodScale = '0.600000'
         vehicleHDCount = '0'; directionalScreenSpaceShadowQuality = '0.000000'; worldHeightShadowQuality = '0.000000'
         anisotropicFiltering = '16'; vSync = '0'
     }
-    Get-ChildItem (Join-Path $env:LEONIDA_DATA_DIR '*\storage\settings\settings.xml') -ErrorAction SilentlyContinue | ForEach-Object {
+    Get-ChildItem (Join-Path $dataDir '*\storage\settings\settings.xml') -ErrorAction SilentlyContinue | ForEach-Object {
         $file = $_.FullName
         $text = [IO.File]::ReadAllText($file)
         $new = $text
