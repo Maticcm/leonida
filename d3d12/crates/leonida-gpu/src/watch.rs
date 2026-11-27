@@ -2568,6 +2568,218 @@ impl Landed {
 
 static LANDED: Landed = Landed([const { std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()) }; Landed::PIECES]);
 
+/// Which bytes of a 4 KiB page: its 512 cells of 8 bytes, a bit each.
+pub(crate) type Cells = [u64; 8];
+
+/// The cells of the bytes `[from, to)` of a page (offsets in it).
+pub(crate) fn cells_between(from: usize, to: usize) -> Cells {
+    let mut cells = [0u64; 8];
+    if from < to {
+        for cell in from / 8..=(to.min(KERNEL_PAGE) - 1) / 8 {
+            cells[cell / 64] |= 1 << (cell % 64);
+        }
+    }
+    cells
+}
+
+/// A page of [`LandedCells`]: the span of frames it was last noted in (its number and one; 0: never; all ones:
+/// being turned over), the cells noted in that span and those noted in the span before it.
+struct PageCells {
+    span: std::sync::atomic::AtomicU32,
+    now: [std::sync::atomic::AtomicU64; 8],
+    before: [std::sync::atomic::AtomicU64; 8],
+}
+
+type CellsPiece = [PageCells; Landed::PAGES];
+
+/// [`Landed`] by cells of 8 bytes: where in a page what shaders wrote was put into title memory, lately. A page
+/// says that a shader's write went into it; the title keeps its own constants beside what its shaders write
+/// (a ring in the heap the skinning passes write), and by pages those looked written by shaders for as long as
+/// a neighbour 16 bytes away was: every copy of the title's into them at its place in a list waited for the
+/// flights, 50 to 65 ms of a 110 ms frame (2026-11-27). Pieces of 256 MiB as there, made (all zeros, which the
+/// system commits page by page) when a page of theirs is first noted, and never let go.
+struct LandedCells([std::sync::atomic::AtomicPtr<CellsPiece>; Landed::PIECES]);
+
+impl LandedCells {
+    /// Frames in a span: "lately" is this span and the one before it, 512 to 1,023 frames.
+    const SPAN: u64 = 512;
+
+    fn span(frame: u64) -> u32 {
+        ((frame / Self::SPAN) as u32 & 0x3fff_ffff) + 1
+    }
+
+    fn page(&self, page: usize, make: bool) -> Option<&PageCells> {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire};
+        let place = self.0.get(page / Landed::PAGES)?;
+        let mut piece = place.load(Acquire);
+        if piece.is_null() {
+            if !make {
+                return None;
+            }
+            let layout = std::alloc::Layout::new::<CellsPiece>();
+            // SAFETY: a layout of some size; all zeros is a piece no page of which was noted.
+            let made = unsafe { std::alloc::alloc_zeroed(layout) }.cast::<CellsPiece>();
+            if made.is_null() {
+                return None;
+            }
+            piece = match place.compare_exchange(std::ptr::null_mut(), made, AcqRel, Acquire) {
+                Ok(_) => made,
+                Err(there) => {
+                    // SAFETY: made just now with this layout, and another thread's is there.
+                    unsafe { std::alloc::dealloc(made.cast(), layout) };
+                    there
+                }
+            };
+        }
+        // SAFETY: a piece, which is never freed.
+        Some(unsafe { &(&*piece)[page % Landed::PAGES] })
+    }
+
+    fn note(&self, page: usize, cells: &Cells, frame: u64) {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+        let Some(p) = self.page(page, true) else {
+            return;
+        };
+        let span = Self::span(frame);
+        loop {
+            let was = p.span.load(Acquire);
+            if was == span {
+                break;
+            }
+            if was == u32::MAX {
+                std::hint::spin_loop();
+                continue;
+            }
+            if p.span.compare_exchange(was, u32::MAX, AcqRel, Acquire).is_ok() {
+                // Turned over: what was noted in the span just before this one is kept as "before".
+                for (now, before) in p.now.iter().zip(&p.before) {
+                    let noted = now.swap(0, Relaxed);
+                    before.store(if was != 0 && was.wrapping_add(1) == span { noted } else { 0 }, Relaxed);
+                }
+                p.span.store(span, Release);
+                break;
+            }
+        }
+        for (now, &more) in p.now.iter().zip(cells) {
+            if more != 0 && now.load(Relaxed) & more != more {
+                now.fetch_or(more, Relaxed);
+            }
+        }
+    }
+
+    /// Whether one of `cells` of `page` was noted in the span of `frame` or the one before it.
+    fn lately(&self, page: usize, cells: &Cells, frame: u64) -> bool {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed};
+        let Some(p) = self.page(page, false) else {
+            return false;
+        };
+        let span = Self::span(frame);
+        let was = p.span.load(Acquire);
+        if was == u32::MAX {
+            // Being turned over: something is landing there now.
+            return true;
+        }
+        if was == span {
+            (0..8).any(|i| (p.now[i].load(Relaxed) | p.before[i].load(Relaxed)) & cells[i] != 0)
+        } else if was != 0 && was.wrapping_add(1) == span {
+            (0..8).any(|i| p.now[i].load(Relaxed) & cells[i] != 0)
+        } else {
+            false
+        }
+    }
+}
+
+static LANDED_CELLS: LandedCells = LandedCells([const { std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()) }; Landed::PIECES]);
+
+/// What shaders wrote went into title memory in these cells: for each, the 4 KiB page (its number) and the
+/// cells in it. Beside the pages' note ([`landing`], [`landed_beside`]), which says no more than the page. The
+/// same pages at other addresses are noted as well, as there.
+pub(crate) fn landing_cells(pages: &[(usize, Cells)]) {
+    let (Some(first), Some(last)) = (pages.iter().map(|p| p.0).min(), pages.iter().map(|p| p.0).max()) else {
+        return;
+    };
+    let frame = crate::frame::current();
+    for (page, cells) in pages {
+        LANDED_CELLS.note(*page, cells, frame);
+    }
+    for (block, others) in elsewhere(first * KERNEL_PAGE, (last - first + 1) * KERNEL_PAGE) {
+        let block = block / KERNEL_PAGE;
+        for (page, cells) in pages.iter().filter(|p| (block..block + BLOCK / KERNEL_PAGE).contains(&p.0)) {
+            for other in &others {
+                LANDED_CELLS.note(page - block + other / KERNEL_PAGE, cells, frame);
+            }
+        }
+    }
+}
+
+/// [`landing_cells`] for every byte of `[at, at + len)`: a caller that does not know which of them change.
+pub(crate) fn landing_cells_whole(at: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let pages: Vec<(usize, Cells)> = (at / KERNEL_PAGE..=(at + len - 1) / KERNEL_PAGE)
+        .map(|page| {
+            let base = page * KERNEL_PAGE;
+            (page, cells_between(at.max(base) - base, (at + len).min(base + KERNEL_PAGE) - base))
+        })
+        .collect();
+    landing_cells(&pages);
+}
+
+/// Whether shaders' writes went into bytes of `[at, at + len)` (by cells of 8) in the last 512 to 1,023
+/// frames. [`landed_lately`] asks by pages.
+pub(crate) fn landed_lately_exact(at: usize, len: usize) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let frame = crate::frame::current();
+    (at / KERNEL_PAGE..=(at + len - 1) / KERNEL_PAGE).any(|page| {
+        let base = page * KERNEL_PAGE;
+        let cells = cells_between(at.max(base) - base, (at + len).min(base + KERNEL_PAGE) - base);
+        LANDED_CELLS.lately(page, &cells, frame)
+    })
+}
+
+#[cfg(test)]
+mod cells_tests {
+    use super::*;
+
+    #[test]
+    fn cells_are_the_bytes_of_a_page_by_eights() {
+        assert_eq!(cells_between(0, 0), [0; 8]);
+        assert_eq!(cells_between(0, 1), [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(cells_between(7, 9), [3, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(cells_between(8, 16), [2, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(cells_between(4088, 4096), [0, 0, 0, 0, 0, 0, 0, 1 << 63]);
+        assert_eq!(cells_between(0, 4096), [u64::MAX; 8]);
+    }
+
+    /// The case the cells are for: the title's constants end where a shader's small buffer begins.
+    #[test]
+    fn a_write_beside_other_bytes_of_the_page_is_not_one_into_them() {
+        static NOTED: LandedCells = LandedCells([const { std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()) }; Landed::PIECES]);
+        let page = 0xd66bb;
+        NOTED.note(page, &cells_between(0xe30, 0xe88), 1000);
+        // The constants at 0xc00..0xe30, and the shader's bytes.
+        assert!(!NOTED.lately(page, &cells_between(0xc00, 0xe30), 1000));
+        assert!(NOTED.lately(page, &cells_between(0xe30, 0xe31), 1000));
+        assert!(NOTED.lately(page, &cells_between(0xe00, 0xe38), 1000));
+        assert!(!NOTED.lately(page, &cells_between(0xe88, 0x1000), 1000));
+        assert!(!NOTED.lately(page + 1, &cells_between(0, 0x1000), 1000));
+        // Known through the next span of frames, forgotten in the one after.
+        assert!(NOTED.lately(page, &cells_between(0xe30, 0xe88), 1000 + LandedCells::SPAN));
+        assert!(!NOTED.lately(page, &cells_between(0xe30, 0xe88), 1000 + 2 * LandedCells::SPAN));
+        // A note in the next span keeps the one before beside it; one two spans on drops both.
+        NOTED.note(page, &cells_between(0x100, 0x108), 1000 + LandedCells::SPAN);
+        assert!(NOTED.lately(page, &cells_between(0xe30, 0xe88), 1000 + LandedCells::SPAN));
+        assert!(NOTED.lately(page, &cells_between(0x100, 0x108), 1000 + LandedCells::SPAN));
+        NOTED.note(page, &cells_between(0x200, 0x208), 1000 + 3 * LandedCells::SPAN);
+        assert!(!NOTED.lately(page, &cells_between(0x100, 0x108), 1000 + 3 * LandedCells::SPAN));
+        assert!(!NOTED.lately(page, &cells_between(0xe30, 0xe88), 1000 + 3 * LandedCells::SPAN));
+        assert!(NOTED.lately(page, &cells_between(0x200, 0x208), 1000 + 3 * LandedCells::SPAN));
+    }
+}
+
 /// A page's number, spread.
 #[derive(Default)]
 struct PageHash(u64);

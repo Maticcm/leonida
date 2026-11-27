@@ -2993,6 +2993,7 @@ fn under_wide() -> bool {
 /// where the old race is left.
 fn put_changed(at: usize, title: &[u8], merged: &[u8]) -> usize {
     crate::watch::landing(at, title.len());
+    crate::watch::landing_cells_whole(at, title.len());
     if !exact_back() {
         crate::host::write_mapped(at as *mut u8, merged.as_ptr(), merged.len());
         return merged.len();
