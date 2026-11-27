@@ -1571,11 +1571,16 @@ mod host {
         fn begin(&mut self) {
             self.view = self.sony.poll();
             if !std::mem::replace(&mut self.began, true) {
+                // Leonida: before any input the family is what is connected; with no pad at all, the keyboard.
+                let xinput = (0..PADS as u32).any(|slot| {
+                    let mut state = XINPUT_STATE::default();
+                    // SAFETY: room for the state.
+                    unsafe { XInputGetState(slot, &mut state) == 0 }
+                });
+                let (start, why) = family::at_start(self.view.present, xinput);
                 let mut shared = family::SHARED.lock().unwrap_or_else(|e| e.into_inner());
-                if self.view.present {
-                    shared.tracker().start_with(Family::PlayStation);
-                }
-                shared.publish(if self.view.present { "a Sony pad is connected" } else { "no input yet" });
+                shared.tracker().start_with(start);
+                shared.publish(why);
             }
         }
 
