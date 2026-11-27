@@ -149,19 +149,130 @@ The D3D12 runtime (`d3d12/`) has its own GameInput module (`d3d12/crates/leonida
 with a stand-in pad made from the keyboard and mouse, present while no host pad is connected (or beside one, with
 `LEONIDA_ONE_PAD`, the default). Keys and mouse buttons count only while a window of the runtime has focus.
 
-| input | pad |
-|---|---|
-| W A S D / I J K L | left / right stick |
-| arrows | d-pad |
-| Space or Enter, F or Y, R or Backspace, X | A, Y, B, X |
-| Q / E | shoulders |
-| Left Shift or Left Ctrl / C or H | left / right stick click |
-| Z or right mouse button | left trigger (LT, aim) |
-| V or left mouse button | right trigger (RT, fire) |
-| Esc, Tab | Menu, View |
+### Grand Theft Auto V's layout: one table on foot, one in a vehicle
 
-The mouse buttons pull the triggers fully while held. They are not passed to the title while the F1 settings menu or
-the F4 trainer menu is open, and they never reach the title as keyboard keys.
+The title reads a pad only, and on a pad one button is two actions: the right trigger shoots on foot and accelerates
+in a vehicle, the left trigger aims and brakes. One table of keys cannot be a PC layout then, so there are two
+(`gameinput/kbm.rs`), and the stand-in pad uses the one of what the player is in. The keys are Grand Theft Auto V's
+PC defaults (its key bindings as listed in BisectHosting's "GTA V controls guide" and on StrategyWiki's controls
+page). The pad button of each action is the title's default pad layout as far as it is known: the table below is the
+one that came with the PC prompt glyphs (a contributor's notes on the Xbox layout), not measured here.
+
+| pad | on foot | in a vehicle |
+|---|---|---|
+| left stick, click | move, run | steer (lean on a bike), horn |
+| right stick, click | camera, look behind (zoom while aiming) | camera, look behind |
+| A / B / X / Y | jump and climb / crouch / melee and reload / interact, enter a vehicle | handbrake / duck, headlights / not known / leave the vehicle |
+| LB / RB | loadout wheel, holster / cover | loadout wheel / shoot from the vehicle |
+| LT / RT | aim / shoot | brake and reverse / accelerate |
+| d-pad up, down, left, right | phone, HUD and objective, radio menu, partner menu | the same |
+| Menu / View | pause / map | the same |
+
+| key | on foot | in a vehicle |
+|---|---|---|
+| W, S | left stick up, down: move | RT, LT (fully): accelerate, brake and reverse |
+| A, D | left stick left, right: move | the same: steer |
+| mouse | right stick: camera (mouse look, below) | the same |
+| left mouse button | RT: shoot | RB: shoot from the vehicle |
+| right mouse button | LT: aim | nothing (the button that aims from a vehicle is not known) |
+| Space | A: jump, climb | A: handbrake |
+| Left Shift | left stick click: run | left stick up: lean forward on a bike, nose down in an aircraft |
+| Left Ctrl | B: crouch (GTA V's stealth) | left stick down: lean back, nose up |
+| Num 8, Num 5, Num 4, Num 6 | nothing | left stick up, down, left, right (GTA V's aircraft keys) |
+| Q | RB: cover | d-pad left: radio menu (GTA V's radio wheel) |
+| E | Y: interact (GTA V's context action) | left stick click: horn |
+| F | Y: enter a vehicle | Y: leave it |
+| R | X: reload, melee | X (the same button; GTA V's cinematic camera has none known) |
+| X, H | nothing | B: duck, headlights |
+| Tab | LB: loadout wheel (hold), holster | LB |
+| C | right stick click: look behind | the same |
+| M | View: map | the same |
+| Esc, P | Menu: pause | the same |
+| arrows | d-pad: phone (up) and its menus | the same |
+| Enter, Backspace | A, B: accept and back in the phone and menus | the same |
+| Z | d-pad down: HUD and objective (GTA V's radar zoom, the same press on its pad) | the same |
+| Y; I J K L | Y; right stick (kept from the layout before; GTA V has nothing on them on foot) | the same |
+
+GTA V keys left without a binding, because the title's pad button for the action is not known: V (camera view), G
+(grenade; landing gear), O (heavy melee), the number keys (weapon slots), `[` `]` `,` `.` `=` `-` (zoom, radio), T, B,
+N, the F keys (character switch), Insert, Page Up and Page Down, the middle mouse button, and Caps Lock (GTA V's
+special ability), which is the switch described below. Left Alt (GTA V's character switch) would be the partner
+menu, d-pad right, and is left out because every Alt+Tab would press it; the right arrow is that button. For the
+same reason Tab, Enter, Space and Esc give nothing while an Alt key is down. The mouse wheel (GTA V's next and previous weapon, and zoom
+while aiming) is not bound either: the pad has no button known for the next weapon, and the host source polls key
+states (`GetAsyncKeyState`), which a wheel does not have; it would have to be counted from `WM_MOUSEWHEEL` in the
+window procedure of `lifecycle.rs`. The layout before had Z and V as the triggers, X as X, H as a second right stick
+click and Left Ctrl as a second left stick click; those went where GTA V has another meaning for the key.
+`LEONIDA_KBM=classic` brings the table of before back whole (`FALLBACK_BUTTONS`: W A S D and I J K L the sticks,
+Space or Enter A, R or Backspace B, X, F or Y, Q and E the shoulders, Left Shift or Left Ctrl and C or H the stick
+clicks, Z or the right mouse button LT, V or the left mouse button RT, Esc Menu, Tab View).
+
+In an aircraft A and D are the left stick (roll), not GTA V's rudder: only "in a vehicle" is known, not which kind.
+
+### Which table counts
+
+`gameinput::set_player_context(OnFoot | InVehicle | Unknown)` tells the stand-in pad, lock-free from any thread; a
+context that is not set again for 500 ms is unknown (and the pad only lets go of a known one after 100 ms of
+unknown). Unknown is the on-foot table, and then **Caps Lock** switches to the driving table and back by hand, with a
+line in the log at every change of table; driving by hand also ends when F (leave the vehicle) is pressed, so that W
+cannot stay the right trigger on foot. While a context is measured Caps Lock does nothing: it is GTA V's special
+ability key, and a press out of habit on foot must not make W a shot. `gameinput::driving_controls()` says which
+table is in use (for whoever draws key prompts).
+
+**The hand-over** when the table changes: a key that is another pad input in the other table (W, S, the mouse buttons,
+Left Shift, Left Ctrl, Q, E, X, H) and is down at that moment gives nothing until it has been let go and pressed
+again, and no such key gives anything for 400 ms after the change (`LEONIDA_KBM_SETTLE_MS`, 0 to 3000). So the left
+mouse button held on foot never becomes the accelerator and W held in a car never becomes a shot; the price is that W
+held while getting in has to be pressed again to drive off. Keys that are the same pad input in both tables (A, D,
+Space, F, ...) carry over as a real pad's button would. Unit-tested over every set of held keys in both directions
+(`cargo test -p leonida-hle gameinput`).
+
+**Who tells.** `d3d12/apps/leonida/src/player_context.rs` reads the title every 16 ms from a thread of its own
+(`ReadProcessMemory` on the own process: nothing is written and no title code is called, so it does not need
+`LEONIDA_GAME_ACTIONS=1`; without the game actions it looks the two globals up itself at start, two more passes over
+the image's code, about 0.15 s together on the retail executable's 99.9 MB of code). It tells `Unknown` while there is no player ped, and a change counts after three equal reads. What
+says "in a vehicle" is, in this order:
+
+1. `LEONIDA_PED_VEHICLE_AT=0x<offset>`: a field of the player's ped that points at its vehicle and is null on foot.
+   None is known (see below why there may be none), so this is unset by default.
+2. The title's own global of the player's vehicle (`Site::PlayerVehicle` in `leonida-loader/src/game_actions.rs`,
+   found by a pattern that is in the 1.0.2.1 executable once; `LEONIDA_PLAYER_VEHICLE_AT=0x<offset in the image>`
+   names another, `=off` turns it off). **Read from the code, not yet seen in the running title:**
+   - The title keeps what belongs to a ped apart from the ped's entity, in tables looked up by the entity's id
+     (`+9Ch`; a ped's id has `60000h` under the mask `3E0000h`, its index is the low 17 bits, and a 16-bit slot of
+     `FFFFh` means "none"). Its "the vehicle this ped is in" (the function at `4DD7510h`) takes column `47h` of
+     those tables and gives the pointer at `+898h` of it when bit `20h` of the byte at `+10h` is set, else null: the
+     shape of GTA V's `GetVehiclePedInside`, a "my vehicle" pointer that outlives the ride plus a flag. That is why a
+     pointer in the ped that is null on foot may not exist at all.
+   - The global at `AB760C8h` is written by one function (`CA4DE0h`), which has three callers: one passes a
+     vehicle (in a function of 129Fh bytes, taken to be where a ped is put in a vehicle), one passes null after
+     testing that the ped's id is the player's (taken to be where a ped is taken out), and the function that sets
+     the player's ped passes what `4DD7510h` gives for the new ped. 167 places in the code read it; the vehicle
+     cheats read a type byte at `+FAh` of what it points at.
+   - Not known until it has run: that it is null in every on-foot state (after a crash through the windscreen, a
+     vehicle that blows up, a cutscene), and when during getting in and out it changes compared with the title's own
+     switch of its controls. The reader logs every change with its time, and warns when the ped moves at 12 m/s for
+     a second while it says "on foot", or the vehicle is 60 m from the ped while it says "in a vehicle".
+3. `LEONIDA_KBM_SPEED=1`: the speed rule. From the ped's position (taken every 0.2 s): 12 m/s (43 km/h; a sprint is
+   about 7) or more for a second without a break is "in a vehicle", until 3 s have passed below that speed; a fall
+   (more down than along) and a jump of the position (a teleport, a respawn) do not count. Its limits are why it is
+   off unless asked for: it never says "on foot" (a car at a red light and a ped standing are the same to it), it
+   cannot see a drive begin, so it never switches from a standstill and the first metres of every drive are on the
+   on-foot keys, and so the meaning of W and of the mouse buttons would change in the middle of a drive, at every
+   stop. It always runs as the check named above.
+
+With none of the three the context stays unknown: the on-foot table, and Caps Lock.
+
+| switch | effect |
+|---|---|
+| `LEONIDA_KBM=classic` | the single table of before; nothing reads the title |
+| `LEONIDA_KBM_DRIVE=on` / `off` / `auto` | forces the driving table on or off (a test; nothing reads the title and Caps Lock does nothing then); `auto` is the default |
+| `LEONIDA_KBM_SETTLE_MS=<ms>` | the pause after a change of table, 400 |
+| `LEONIDA_PED_VEHICLE_AT`, `LEONIDA_PLAYER_VEHICLE_AT`, `LEONIDA_KBM_SPEED` | what says "in a vehicle", above |
+| `LEONIDA_PED_DUMP=<folder>` | for measuring: F8 in the game's window, or a file named `dump` in that folder (its text is the label), writes the first 4000h bytes of the player's ped to `ped-<date>-<time>-<label>.bin`, the first 1000h of the vehicle the global names to `vehicle-...bin`, and a line to `index.txt` (time, addresses, the ped's id, position, speed, what was read). The folder must be outside the repository; the files are the title's memory and are never committed. |
+
+The mouse buttons are not passed to the title while the F1 settings menu or the F4 trainer menu is open, and they
+never reach the title as keyboard keys.
 
 **Mouse look (D3D12 runtime).** The console title turns its camera with the right stick only; it does not read the
 mouse for that. A left click in the game window makes the window hold the mouse: the cursor is hidden and kept in the
