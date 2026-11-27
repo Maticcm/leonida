@@ -59,6 +59,7 @@ DEFAULTS: dict = {
     "aspect": "",            # -Aspect <shape>, empty = 16:9
     "present_scale": "",     # -PresentScale, with -Aspect; empty = the script's default (fit)
     "adapter": "",           # -Adapter <part of the card's name, or #index>
+    "background": "",        # the picture behind PLAY in launcher/; "" = background.* in config_dir()
 }
 # The options with a fixed set of values, and the others whose text has to match a pattern.
 CHOICES: dict = {"resolution": RESOLUTIONS, "dlss_mode": DLSS_MODES, "frame_gen": FRAME_GEN,

@@ -15,7 +15,9 @@ and event streams carry it as a cookie. A page on another site can therefore nei
 anything. Paths never come from the page: mods, captures and saves are named by folder, index or container name
 and looked up in the server's own lists.
 
-Standard library only. Nothing goes online.
+Standard library only. The one thing fetched from the internet is the game's key art for the background, once, when
+there is no background picture yet (fetch_art; --no-art leaves it). It is kept in the launcher's settings folder,
+never in the repository.
 """
 from __future__ import annotations
 
@@ -34,12 +36,18 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 MAX_BODY = 64 * 1024
 MAX_CAPTURES = 60
+MAX_PICTURE = 40 * 1024 * 1024
+PICTURE_NAMES = ("background.webp", "background.png", "background.jpg", "background.jpeg")
+EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+ART_URL = ("https://www.rockstargames.com/VI/_next/static/media/Jason_and_Lucia_Robbery_landscape.09c8a~do21h4p.jpg"
+           "?akim=1&imdensity=1&imwidth=2560")
 QUIET_SECONDS = 12.0     # with no page connected for this long, and nothing running, the server ends
 
 
@@ -105,6 +113,70 @@ def pictures(folders: list[str], limit: int = MAX_CAPTURES) -> list[tuple[float,
     return found[:limit]
 
 
+def sniff(head: bytes) -> str | None:
+    """image/png, image/jpeg or image/webp from a file's first 12 bytes; None for anything else."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def picture_type(path: str) -> str | None:
+    """The type of a file with a picture's name that is one by its bytes; None for anything else, so that no other
+    file can be served as the background."""
+    if os.path.splitext(path)[1].lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+        return None
+    try:
+        if not 0 < os.path.getsize(path) <= MAX_PICTURE:
+            return None
+        with open(path, "rb") as f:
+            return sniff(f.read(12))
+    except OSError:
+        return None
+
+
+def background_picture(settings: dict, folder: str | None = None) -> str:
+    """The picture behind PLAY: the one chosen in Settings, else the newest background.webp, .png or .jpg in the
+    launcher's settings folder (%APPDATA%\\Leonida on Windows), where fetch_art keeps the key art; "" when there is
+    none."""
+    chosen = str(settings.get("background", "")).strip()
+    if chosen:
+        return chosen if os.path.isfile(chosen) and picture_type(chosen) else ""
+    found = []
+    for name in PICTURE_NAMES:
+        path = os.path.join(folder or core.config_dir(), name)
+        try:
+            if os.path.isfile(path) and picture_type(path):
+                found.append((os.path.getmtime(path), path))
+        except OSError:
+            continue
+    return max(found)[1] if found else ""
+
+
+def fetch_art(folder: str, url: str = ART_URL, timeout: float = 30.0) -> str:
+    """Downloads the picture at `url` into `folder` as background.<its type> and returns that path. Raises OSError
+    (no network, an HTTP error) or ValueError (not a PNG, JPEG or WebP, or too big); nothing is kept then. The request
+    carries a plain browser's name and nothing about the user or this project."""
+    request = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "image/webp,image/jpeg,image/png;q=0.9,*/*;q=0.5"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = response.read(MAX_PICTURE + 1)
+    kind = sniff(data[:12])
+    if kind is None or len(data) > MAX_PICTURE:
+        raise ValueError("what came back is not a PNG, JPEG or WebP picture")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "background" + EXTENSIONS[kind])
+    part = path + ".part"
+    with open(part, "wb") as f:
+        f.write(data)
+    os.replace(part, path)
+    return path
+
+
 class Launcher:
     """What the page shows and what it can ask for. One job (the game, or a tool) runs at a time."""
 
@@ -131,6 +203,36 @@ class Launcher:
 
     def mods_dir(self, settings: dict) -> str:
         return settings.get("mods_dir") or os.path.join(self.repo, "mods")
+
+    def background(self, settings: dict) -> str:
+        return background_picture(settings)
+
+    def hero(self, settings: dict, captures: list[dict]) -> dict | None:
+        """The picture behind PLAY: the background picture, else the newest capture, else None (the page draws one)."""
+        path = self.background(settings)
+        if path:
+            try:
+                stamp = os.path.getmtime(path)
+            except OSError:
+                stamp = 0.0
+            return {"url": f"/media/background?v={int(stamp)}", "time": stamp, "kind": "picture"}
+        if captures:
+            return {"url": captures[0]["url"], "time": captures[0]["time"], "kind": "capture"}
+        return None
+
+    def ensure_art(self) -> None:
+        """Fetches the key art once when no background picture is chosen or kept yet, so the window opens on it from
+        then on. A failure leaves the newest capture or the drawn art in its place, and is tried again next start."""
+        settings = self.settings()
+        if str(settings.get("background", "")).strip() or self.background(settings):
+            return
+        try:
+            path = fetch_art(core.config_dir())
+        except (OSError, ValueError) as err:   # urllib's URLError and HTTPError are OSErrors
+            self.say(f"The background picture could not be fetched ({err}); the drawn art stays for now.")
+            return
+        self.say(f"The background picture was fetched once and kept: {path}")
+        self._send("state", None)
 
     def checks(self, settings: dict) -> list[dict]:
         rows = []
@@ -197,7 +299,7 @@ class Launcher:
             "mods": [{"folder": m["folder"], "name": m["name"], "enabled": m["enabled"], "swaps": m["swaps"]}
                      for m in mods],
             "mod_errors": errors, "mods_dir": mods_dir, "saves": self.saves(settings), "captures": captures,
-            "hero": {"url": captures[0]["url"], "time": captures[0]["time"]} if captures else None,
+            "hero": self.hero(settings, captures), "background": self.background(settings),
             "changes": self.changes, "job": job, "log": log,
         }
 
@@ -360,18 +462,24 @@ class Launcher:
         return f"Backed up to {path}"
 
     def browse(self, key: object) -> tuple[str, str]:
-        """A folder picker for one of the folder settings. Returns (message, chosen path)."""
-        if key not in ("game_dir", "data_dir", "mods_dir"):
+        """A folder picker for one of the folder settings, or a file picker for the background picture.
+        Returns (message, chosen path)."""
+        if key not in ("game_dir", "data_dir", "mods_dir", "background"):
             return "That is not a folder setting.", ""
         if not self.can_run:
-            return "Preview: the folder picker opens when the launcher is started from Launcher.bat.", ""
+            return "Preview: the picker opens when the launcher is started from Launcher.bat.", ""
+        if key == "background":
+            ask = ("f.askopenfilename(parent=r, initialdir=sys.argv[1] or None, "
+                   "filetypes=[('Pictures', '*.png *.jpg *.jpeg *.webp')])")
+        else:
+            ask = "f.askdirectory(parent=r, initialdir=sys.argv[1] or None, mustexist=True)"
         code = ("import sys, tkinter, tkinter.filedialog as f\n"
                 "r = tkinter.Tk(); r.withdraw(); r.attributes('-topmost', True)\n"
-                "sys.stdout.buffer.write((f.askdirectory(parent=r, initialdir=sys.argv[1] or None, mustexist=True)"
-                " or '').encode('utf-8'))\n")
+                f"sys.stdout.buffer.write(({ask} or '').encode('utf-8'))\n")
         start = self.settings()[key]
+        folder = os.path.dirname(start) if key == "background" else start
         try:    # a process of its own: Tk wants the main thread, and this is a request thread
-            done = subprocess.run([sys.executable, "-I", "-c", code, start if os.path.isdir(start) else ""],
+            done = subprocess.run([sys.executable, "-I", "-c", code, folder if os.path.isdir(folder) else ""],
                                   capture_output=True, timeout=600, check=False, stdin=subprocess.DEVNULL)
         except (OSError, subprocess.SubprocessError):
             return "No folder picker here: type the path into the box.", ""
@@ -459,6 +567,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._head(200, "image/svg+xml", len(body), {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
         self.wfile.write(body)
 
+    def _background(self) -> None:
+        path = self.launcher.background(self.launcher.settings())
+        kind = picture_type(path) if path else None
+        try:
+            if not kind:
+                raise OSError
+            with open(path, "rb") as f:
+                body = f.read(MAX_PICTURE + 1)
+        except OSError:
+            self._refuse(404, "No background picture.")
+            return
+        self._head(200, kind, len(body))
+        self.wfile.write(body)
+
     def _capture(self, index_text: str) -> None:
         try:
             with self.launcher.lock:
@@ -516,6 +638,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/events":
             if self._has_cookie():
                 self._events()
+            else:
+                self._refuse(403, "Reload the launcher's page.")
+        elif path == "/media/background":
+            if self._has_cookie():
+                self._background()
             else:
                 self._refuse(403, "Reload the launcher's page.")
         elif path.startswith("/media/capture/"):
@@ -613,6 +740,8 @@ def main() -> int:
     ap.add_argument("--stay", action="store_true", help="keep serving after the page is closed")
     ap.add_argument("--repo", default=REPO,
                     help="the checkout whose start scripts and builds are meant (default: the one this file is in)")
+    ap.add_argument("--no-art", action="store_true",
+                    help="do not fetch the key art when there is no background picture yet")
     a = ap.parse_args()
 
     launcher = Launcher(settings_path=a.settings, can_run=not a.no_run, repo=os.path.abspath(a.repo))
@@ -625,6 +754,8 @@ def main() -> int:
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     print(f"launcher: {url}" + ("  (preview: nothing is started)" if a.no_run else ""), flush=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    if not a.no_art:
+        threading.Thread(target=launcher.ensure_art, daemon=True).start()
     if not a.no_window:
         open_window(url)
     try:

@@ -10,7 +10,8 @@
 /* Layout, after the usual shape of a publisher's game launcher: a slim black rail of square tiles with a selection
    bar, picture art over the whole window, the sections as uppercase words top right, the logo with one big light
    button and a small menu button under it, and a row of black cards. The other pages are a dark sheet over the art.
-   No network: system fonts, the logo is the repository's assets/logo.svg, the art is drawn by this page. */
+   The page loads nothing from the network: system fonts, the repository's assets/logo.svg, and the background
+   picture the server keeps on this PC (else art drawn here). */
 :root {
   color-scheme: dark;
   --ink: #0b0b0d;          /* text on the light button, and the dark sheet */
@@ -69,6 +70,11 @@ a { color: inherit; }
 /* ---- the main area: art, the words top right, the pages ---- */
 main { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #dba6c2; }
 .art { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+/* A picture sits a little lower, so heads clear the words top right; its top row, measured, fills the band above it,
+   and the picture fades into that. */
+#shot { top: 7%; bottom: auto; object-position: 50% 0; -webkit-mask-image: linear-gradient(to bottom, transparent, #000 9%);
+        mask-image: linear-gradient(to bottom, transparent, #000 9%); }
+main[data-art="picture"] #art { display: none; }
 .veil { position: absolute; inset: 0; background: rgba(9, 9, 11, .93); display: none; }
 main:not([data-page="play"]) .veil { display: block; }
 .top { position: absolute; inset: 0 0 auto 0; height: 124px; z-index: 3; display: flex; align-items: center; justify-content: flex-end; gap: 36px;
@@ -87,6 +93,10 @@ main[data-tone="dark"] .top nav a:hover, main[data-tone="dark"] .top nav a[aria-
 
 /* ---- Play ---- */
 #page-play { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 12px; padding: 40px 0 70px var(--pad); align-items: start; }
+/* Over a picture the cards sit along the bottom, so the faces in it stay clear. */
+main[data-art="picture"] #page-play { min-height: 100%; grid-template-rows: minmax(0, 1fr); padding-bottom: 54px; }
+main[data-art="picture"] .carousel { align-self: end; }
+main[data-art="picture"] .card { flex-basis: clamp(250px, 29vw - 40px, 360px); }
 .title { display: grid; justify-items: start; gap: 4px; min-width: 0; }
 .biglogo { width: 236px; height: 150px; object-fit: contain; object-position: left center; filter: drop-shadow(0 5px 12px rgba(20, 6, 30, .4)); margin-left: -6px; }
 .wordmark { margin: -6px 0 0; font: 900 50px/1 var(--font-heavy); letter-spacing: .015em; text-transform: uppercase; color: #fff;
@@ -311,7 +321,7 @@ h2.label { font: 700 12px/1 var(--font); letter-spacing: .16em; text-transform: 
       <!-- Captures -->
       <section class="page" id="page-captures" hidden>
         <header class="page-head"><h1>Captures</h1>
-          <p>Pictures you made in the game. The newest one becomes the picture behind PLAY. They stay on this PC.</p>
+          <p>Pictures you made in the game. They stay on this PC.</p>
           <div class="row"><button class="btn" type="button" data-open="captures"><svg class="ic" aria-hidden="true"><use href="#i-folder"/></svg>Open the captures folder</button></div>
         </header>
         <div id="captures"></div>
@@ -347,8 +357,8 @@ h2.label { font: 700 12px/1 var(--font); letter-spacing: .16em; text-transform: 
           <p>Leonida is a compatibility runtime that runs your own copy of the Xbox Series build of GTA VI on a PC: a loader that maps the
              game's executable and a Direct3D 12 layer that draws its frames on your graphics card.</p>
           <p>It is an unofficial, independent project. It is not made, endorsed or supported by the game's publisher, and it contains none of
-             the game: you build it from a copy you own, and nothing goes online. The picture behind PLAY is drawn by this page until you
-             make a capture of your own; the logo is the repository's assets/logo.svg.</p>
+             the game: you build it from a copy you own, and the game itself never goes online. The picture behind PLAY is the
+             game's key art, fetched once from rockstargames.com and kept on this PC, unless you choose your own in Settings; the logo is the repository's assets/logo.svg.</p>
           <h2 class="label" style="margin:10px 0 0">Built on the work of others</h2>
           <ul>
             <li>VIctory by Marvisak and its contributors: the loader, the runtime services, the Direct3D 12 back end, the shader recompiler</li>
@@ -422,7 +432,7 @@ for (const img of document.querySelectorAll("img[data-logo]")) {
 // ---------------------------------------------------------------- the options and what they stand for
 // The keys are those of the launcher's settings file (tools/leonida_launcher.py). Two controls stand for two keys
 // each: `console` (series_s, series_x) and `upscale` (dlss, off = -NoDlss, and dlss_mode, -Dlss <mode>).
-const DEFAULTS = { game_dir: "", data_dir: "", mods_dir: "", series_s: false, series_x: false, dlss: true, dlss_mode: "", resolution: "",
+const DEFAULTS = { game_dir: "", data_dir: "", mods_dir: "", background: "", series_s: false, series_x: false, dlss: true, dlss_mode: "", resolution: "",
   frame_gen: 0, smooth_motion: false, aspect: "", present_scale: "", ray_tracing: false, quality: false, adapter: "", precompile: true,
   capture: false, log: false };
 const GROUPS = [
@@ -458,6 +468,9 @@ const GROUPS = [
       help: "Every shader is translated and the pipelines of earlier runs are made before the game starts: minutes the first time, seconds after. Off starts at once, and the world can come up half drawn." },
     { key: "capture", kind: "switch", label: "Capture key", windows: true, help: "F9 in the game saves that frame to %LOCALAPPDATA%\\Leonida\\captures." },
     { key: "log", kind: "switch", label: "Write a log file", windows: true, help: "The runtime's log goes to %LOCALAPPDATA%\\Leonida\\logs." } ] },
+  { title: "Launcher", fields: [
+    { key: "background", kind: "file", label: "Background picture", placeholder: "The key art, kept in %APPDATA%\\Leonida",
+      help: "A picture of your own behind PLAY. Without one, the launcher fetches the game's key art from rockstargames.com once and keeps it in %APPDATA%\\Leonida. Pictures are never part of the repository." } ] },
 ];
 // The tiles of the rail: four setups of the one game, where a publisher's launcher lists its games.
 const PRESETS = [
@@ -603,9 +616,13 @@ function renderPlay() {
   renderCards(); chip();
   $("sample").hidden = !S.sample;
   $("logline").textContent = S.log.length ? S.log[S.log.length - 1] : "";
-  const shot = $("shot");
-  if (S.hero) { if (shot.dataset.src !== S.hero.url) { shot.dataset.src = S.hero.url; shot.src = S.hero.url; } shot.hidden = false; }
-  else { shot.hidden = true; shot.dataset.tone = ""; }
+  const shot = $("shot"), main = $("main");
+  if (S.hero) {
+    if (shot.dataset.src !== S.hero.url) { shot.dataset.src = S.hero.url; shot.src = S.hero.url; }
+    shot.hidden = false; main.dataset.art = "picture";
+  } else if (main.dataset.art !== "drawn") {
+    shot.hidden = true; shot.dataset.tone = ""; shot.dataset.src = ""; main.dataset.art = "drawn"; main.style.backgroundColor = ""; paintArt();
+  }
   tone();
 }
 // The cards: what still needs doing first, then your newest captures, then the repository's latest changes.
@@ -674,10 +691,19 @@ function control(f, s, off) {
   // a typed character must not rebuild the field under the cursor: only what follows from it is painted again
   const input = h("input", { type: "text", id, value: s[f.key], placeholder: f.placeholder, spellcheck: "false", autocomplete: "off", disabled: off, "aria-label": f.label,
     oninput: e => { S.settings[f.key] = e.target.value; softChange(); } });
-  if (f.kind !== "path") return input;
-  const check = f.check && S.checks.find(c => c.id === f.check);
-  return [input, h("button", { class: "btn", type: "button", disabled: off, onclick: () => act("browse", { key: f.key }) }, icon("folder"), "Browse"),
-    check ? h("span", { class: "verdict", "data-state": check.state }, check.detail) : null];
+  if (f.kind !== "path" && f.kind !== "file") return input;
+  const v = verdictFor(f);
+  return [input, h("button", { class: "btn", type: "button", disabled: off, onclick: () => act("browse", { key: f.key }) }, icon("folder"), f.kind === "file" ? "Choose" : "Browse"),
+    v ? h("span", { class: "verdict", "data-state": v.state }, v.detail) : null];
+}
+function verdictFor(f) {
+  if (f.key === "background") {
+    if (S.background) return { state: "ok", detail: "In use: " + S.background };
+    if (S.settings.background.trim()) return { state: "todo", detail: "No PNG, JPEG or WebP picture at this path." };
+    return { state: "", detail: "Not fetched yet: the launcher tries at each start. Until then your newest capture, else the drawn art." };
+  }
+  const c = f.check && S.checks.find(c => c.id === f.check);
+  return c ? { state: c.state, detail: c.detail } : null;
 }
 function softChange() {
   renderSummary(); renderPlay();
@@ -686,9 +712,9 @@ function softChange() {
   saveTimer = setTimeout(async () => { try { S = (await call("settings", S.settings)).state; renderSummary(); renderPlay(); renderVerdicts(); renderSaves(); renderMods(); } catch (err) { toast(err.message); } }, 500);
 }
 function renderVerdicts() {
-  for (const g of GROUPS) for (const f of g.fields) if (f.check) {
-    const v = document.querySelector("#field-" + f.key + " .verdict"), c = S.checks.find(c => c.id === f.check);
-    if (v && c) { v.dataset.state = c.state; v.textContent = c.detail; }
+  for (const g of GROUPS) for (const f of g.fields) {
+    const el = document.querySelector("#field-" + f.key + " .verdict"), v = el && verdictFor(f);
+    if (v) { el.dataset.state = v.state; el.textContent = v.detail; }
   }
 }
 function renderSettings() {
@@ -811,7 +837,11 @@ $("shot").addEventListener("load", e => {   // how bright the capture is where t
   const g = c.getContext("2d"); g.drawImage(e.target, 0, 0, 32, 18);
   const d = g.getImageData(12, 0, 20, 5).data; let sum = 0;
   for (let i = 0; i < d.length; i += 4) sum += d[i] * .299 + d[i + 1] * .587 + d[i + 2] * .114;
-  e.target.dataset.tone = sum / (d.length / 4) < 150 ? "dark" : "light"; tone();
+  e.target.dataset.tone = sum / (d.length / 4) < 150 ? "dark" : "light";
+  const t = g.getImageData(0, 0, 32, 1).data; let cr = 0, cg = 0, cb = 0;   // its top row, continued above it
+  for (let i = 0; i < t.length; i += 4) { cr += t[i]; cg += t[i + 1]; cb += t[i + 2]; }
+  $("main").style.backgroundColor = "rgb(" + [cr, cg, cb].map(v => Math.round(v / 32)).join(",") + ")";
+  tone();
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape") { menu(false); showLog(false); } });
 window.addEventListener("hashchange", route);
