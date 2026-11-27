@@ -22,15 +22,22 @@ import find_hash_lookup as fhl  # noqa: E402
 TEXT_RVA, TEXT_RAW = 0x1000, 0x400
 
 
-def pe(code):
-    """A minimal PE32+ file whose only section, .text (executable), holds `code`."""
+def pe(code, vsize=None, rsize=None, raw_offset=None):
+    """A minimal PE32+ file whose only section, .text (executable), holds `code`.
+
+    The optional fields let a test describe a truncated section (raw offset past EOF, zero vsize) while the file
+    itself stays well-formed enough to parse its headers.
+    """
     header = bytearray(TEXT_RAW)
     header[0:2] = b"MZ"
     struct.pack_into("<I", header, 0x3C, 0x40)
     header[0x40:0x44] = b"PE\0\0"
     struct.pack_into("<HHIIIHH", header, 0x44, 0x8664, 1, 0, 0, 0, 0xF0, 0x22)
     first = 0x44 + 20 + 0xF0
-    struct.pack_into("<8sIIIIIIHHI", header, first, b".text", len(code), TEXT_RVA, len(code), TEXT_RAW,
+    struct.pack_into("<8sIIIIIIHHI", header, first, b".text",
+                     len(code) if vsize is None else vsize, TEXT_RVA,
+                     len(code) if rsize is None else rsize,
+                     TEXT_RAW if raw_offset is None else raw_offset,
                      0, 0, 0, 0, 0x60000020)
     return bytes(header) + code
 
@@ -149,31 +156,53 @@ class FindHashLookupTest(unittest.TestCase):
                          "window=0 must yield no candidates")
 
     def test_negative_window_raises(self):
-        """rank() with window < 0 must raise ValueError, not silently misbehave."""
+        """rank() with window < 0 must raise ValueError naming its own parameter, not just the CLI flag."""
         data, _, _ = image()
-        with self.assertRaises(ValueError, msg="negative window must raise"):
+        with self.assertRaises(ValueError) as raised:
             fhl.rank(data, [("player_story000_00", fhl.joaat("player_story000_00"))], window=-1)
+        self.assertRegex(str(raised.exception), r"^window must be >= 0, got -1$")
 
     def test_non_positive_top_raises(self):
-        """rank() with top <= 0 must raise ValueError; top=-1 would otherwise return a wrong slice."""
+        """rank() with top <= 0 must raise ValueError naming its own parameter; top=-1 returns a wrong slice."""
         data, _, _ = image()
         hashes = [("player_story000_00", fhl.joaat("player_story000_00"))]
-        with self.assertRaises(ValueError, msg="top=0 must raise"):
+        with self.assertRaises(ValueError) as raised:
             fhl.rank(data, hashes, top=0)
-        with self.assertRaises(ValueError, msg="top=-1 must raise"):
+        self.assertRegex(str(raised.exception), r"^top must be >= 1, got 0$")
+        with self.assertRaises(ValueError) as raised:
             fhl.rank(data, hashes, top=-1)
+        self.assertRegex(str(raised.exception), r"^top must be >= 1, got -1$")
 
     def test_truncated_pe_does_not_crash(self):
-        """A PE whose raw section data is cut short must not raise; it scans what is available."""
+        """A truncated PE's section size is clamped to the bytes actually present in the file."""
         data, _, _ = image()
-        # Chop 100 bytes off the end so the section extends beyond the file.
-        truncated = data[:-100]
-        # Must not raise; result may have zero candidates but must not throw.
-        try:
-            fhl.rank(truncated, [("player_story000_00", fhl.joaat("player_story000_00"))])
-        except (ValueError, struct.error):
-            pass  # acceptable: some truncations invalidate the header itself
-        # The important thing is no unhandled exception propagates.
+        truncated = data[:-100]                      # .text claims 0x400 bytes, only 0x39C remain
+        sections = fhl.sections(truncated)
+        self.assertEqual(len(sections), 1)
+        _name, _rva, raw, size, _executable = sections[0]
+        self.assertEqual(raw, TEXT_RAW)
+        self.assertEqual(size, len(truncated) - raw)
+        self.assertLessEqual(size, len(truncated) - raw)
+        report = fhl.rank(truncated, [("player_story000_00", fhl.joaat("player_story000_00"))])
+        self.assertIsInstance(report["candidates"], list)
+
+    def test_section_raw_pointer_past_eof_clamps_to_zero(self):
+        """A section whose raw pointer is beyond EOF must get size 0, never a negative size or a scan past EOF."""
+        data = pe(b"\x90" * 16, raw_offset=0x10000)
+        sections = fhl.sections(data)
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(sections[0][2], 0x10000)
+        self.assertEqual(sections[0][3], 0)
+        self.assertLessEqual(sections[0][3], max(0, len(data) - sections[0][2]))
+
+    def test_section_zero_vsize_uses_raw_size(self):
+        """vsize == 0 means 'use the raw size', clamped by what the file actually holds."""
+        data = pe(b"\x90" * 16, vsize=0, rsize=8)
+        sections = fhl.sections(data)
+        self.assertEqual(len(sections), 1)
+        self.assertEqual(sections[0][3], 8)
+        shorter = pe(b"\x90" * 4, vsize=0, rsize=8)
+        self.assertEqual(fhl.sections(shorter)[0][3], 4)
 
     def test_cli_negative_window_exits_with_error(self):
         """--window -1 on the CLI must exit non-zero with an ERROR line, no traceback."""
@@ -188,6 +217,7 @@ class FindHashLookupTest(unittest.TestCase):
             )
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("ERROR", r.stderr)
+            self.assertIn("--window", r.stderr)      # CLI keeps the flag name, rank() uses its parameter name
             self.assertNotIn("Traceback", r.stderr)
 
     def test_cli_top_zero_exits_with_error(self):
@@ -203,6 +233,7 @@ class FindHashLookupTest(unittest.TestCase):
             )
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("ERROR", r.stderr)
+            self.assertIn("--top", r.stderr)         # CLI keeps the flag name, rank() uses its parameter name
             self.assertNotIn("Traceback", r.stderr)
 
 

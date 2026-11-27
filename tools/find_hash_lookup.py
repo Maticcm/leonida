@@ -85,10 +85,11 @@ def direct_calls(code, base_rva):
 
 
 def rank(data, hashes, window=48, top=15):
+    # Name the parameters, not the CLI flags: rank() is a library function too.
     if window < 0:
-        raise ValueError(f"--window must be >= 0, got {window}")
+        raise ValueError(f"window must be >= 0, got {window}")
     if top <= 0:
-        raise ValueError(f"--top must be >= 1, got {top}")
+        raise ValueError(f"top must be >= 1, got {top}")
     code_sections = [s for s in sections(data) if s[4]]
     if not code_sections:
         raise ValueError("no executable section")
@@ -149,7 +150,11 @@ def main(argv=None):
             data = f.read()
         report = rank(data, hashes, a.window, a.top)
     except (OSError, ValueError, struct.error) as e:
-        print(f"ERROR: {a.exe}: {e}", file=sys.stderr)
+        # rank() names its parameters; on the CLI show the flags the user actually typed.
+        message = str(e)
+        if message.startswith(("window ", "top ")):
+            message = "--" + message
+        print(f"ERROR: {a.exe}: {message}", file=sys.stderr)
         return 2
     for h in report["hashes"]:
         print(f"{h['name']} = {h['value']}: {h['occurrences']} occurrence(s) in code")
