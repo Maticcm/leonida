@@ -3483,8 +3483,9 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
     if written.is_empty() {
         return None;
     }
-    // Destinations of copies at their place, if a step reads them.
-    let mut placed: Vec<(usize, usize)> = Vec::new();
+    // Copies at their place that wait if a step reads their destination: each by its address in its list's
+    // steps, and that destination.
+    let mut placed: Vec<(usize, usize, usize)> = Vec::new();
     // Diagnostics: and why each was not taken for the title's own.
     #[cfg(feature = "diagnostics")]
     let mut placed_why: Vec<(usize, usize, &'static str)> = Vec::new();
@@ -3540,7 +3541,7 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                 Step::Placed(p) => match p.waits(written) {
                     place::Waits::No => {}
                     place::Waits::ForReaders => {
-                        placed.push((p.dst, p.dst + p.len));
+                        placed.push((std::ptr::from_ref::<place::Placed>(p) as usize, p.dst, p.dst + p.len));
                         #[cfg(feature = "diagnostics")]
                         placed_why.push((p.dst, p.dst + p.len, p.why_waits(written)));
                     }
@@ -3560,7 +3561,14 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
     if placed.is_empty() {
         return None;
     }
-    let (_kind, _at, _len) = place::reader(runs, placed)?;
+    // Only by a step behind the copy (`place::readers_in_order`): one ahead of it wants the bytes from before.
+    let in_order = place::readers_in_order();
+    let found = place::reader(runs, &placed, in_order, |_, _| false);
+    #[cfg(feature = "diagnostics")]
+    if count && in_order && found.is_none() && place::reader(runs, &placed, false, |_, _| false).is_some() {
+        place::AHEAD.fetch_add(1, Ordering::Relaxed);
+    }
+    let (_kind, _at, _len) = found?;
     // Named for the frame line (it was the one wait there with no name: 20-37 ms once a frame at the dock,
     // 2026-11-27).
     #[cfg(feature = "diagnostics")]
@@ -4492,6 +4500,16 @@ fn late_line(frames: f64) {
             t[2],
             t[3],
         );
+        #[cfg(feature = "diagnostics")]
+        {
+            let ahead = place::AHEAD.swap(0, Ordering::Relaxed) as f64 / frames;
+            if ahead > 0.0 {
+                tracing::info!(
+                    "copies at their place whose bytes wait for flights, read on the CPU only ahead of them, per frame \
+                     (LEONIDA_PLACED_READERS; 0 holds these too): {ahead:.2} submissions not held for flights"
+                );
+            }
+        }
     }
     card_steps::log(frames);
     read_backs_line(frames);
