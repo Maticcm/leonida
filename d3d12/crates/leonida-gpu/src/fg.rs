@@ -56,8 +56,10 @@ pub(crate) fn wanted() -> u32 {
     })
 }
 
-/// `LEONIDA_FG_LIMIT_FPS=<n>`: Reflex holds the rendered frames to n a second (its frame
-/// limit, `frameLimitUs`), so that they come evenly; unset or 0: no limit, as before.
+/// `LEONIDA_FG_LIMIT_FPS=<n>`: Reflex holds the frames **shown** to n a second (its frame
+/// limit, `frameLimitUs`), so that they come evenly; unset or 0: no limit, as before. With
+/// generation on, the limit counts the made frames too: n = 28 holds rendered frames to 14 a
+/// second, 71.4 ms apart (measured: 15 gave rendered frames 133.3 ms apart, 14 gave 142.9).
 ///
 /// Frame generation puts one made frame between two rendered ones, halfway in time. Without
 /// a limit nothing paces the title: a frame that overruns its tick ends the frame wait at
