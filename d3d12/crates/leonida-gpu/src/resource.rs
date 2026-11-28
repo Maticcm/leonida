@@ -4132,19 +4132,45 @@ mod tests {
     #[cfg(all(windows, feature = "diagnostics"))]
     #[test]
     fn alias_after_title_upload_copies_the_gpu_atlas() {
+        alias_shows_the_gpu_atlas(false, (3, 1, 1));
+    }
+
+    /// The same with the copy made from texture to texture (`LEONIDA_ALIAS_DIRECT=1`): the
+    /// host copies R32_UINT into R9G9B9E5 as it is, and the view's texture has the packed
+    /// texel bit for bit.
+    #[cfg(all(windows, feature = "diagnostics"))]
+    #[test]
+    fn an_alias_copied_from_texture_to_texture_has_the_gpu_atlas() {
+        alias_shows_the_gpu_atlas(true, (3, 1, 1));
+    }
+
+    /// And with every part of a texture of several layers and levels (the sky light cache has six
+    /// layers, the screen probes' atlas four levels) and of a volume (the cloud and sky tables).
+    #[cfg(all(windows, feature = "diagnostics"))]
+    #[test]
+    fn aliases_of_layers_levels_and_volumes_are_copied_from_texture_to_texture() {
+        alias_shows_the_gpu_atlas(true, (3, 6, 3));
+        alias_shows_the_gpu_atlas(true, (4, 4, 1));
+        alias_shows_the_gpu_atlas(false, (3, 6, 3));
+    }
+
+    /// A packed texel uploaded into a written R32_UINT texture is read back from the texture
+    /// of an R9G9B9E5 view placed in its memory, after an upload of that view from title
+    /// memory and its alias copy: through a buffer, or `direct`, from texture to texture.
+    #[cfg(all(windows, feature = "diagnostics"))]
+    fn alias_shows_the_gpu_atlas(direct: bool, (dimension, depth_or_array_size, mips): (u32, u16, u16)) {
         use std::sync::atomic::Ordering::Relaxed;
         use windows::Win32::Graphics::Direct3D12::*;
 
         let Some(host) = crate::host::host() else {
             return;
         };
+        crate::texture::TEST_ALIAS_DIRECT.set(Some(direct));
         let null = std::ptr::null();
         let mut source = null;
         let mut view = null;
-        let source_desc = ResourceDesc {
-            flags: 4,
-            ..texture(4, 4, 42, 1)
-        };
+        let shaped = |format: u32| ResourceDesc { dimension, depth_or_array_size, ..texture(8, 8, format, mips) };
+        let source_desc = ResourceDesc { flags: 4, ..shaped(42) };
         assert_eq!(
             create_committed(
                 null, &PROPERTIES, 0, &source_desc, 0, null.cast(), &RESOURCE_IIDS[0], &mut source,
@@ -4153,7 +4179,7 @@ mod tests {
         );
         assert_eq!(
             create_at_address(
-                null, resource(source).data() as u64, &texture(4, 4, 67, 1), 0,
+                null, resource(source).data() as u64, &shaped(67), 0,
                 null.cast(), &RESOURCE_IIDS[0], &mut view,
             ),
             S_OK

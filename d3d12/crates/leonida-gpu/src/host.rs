@@ -4787,6 +4787,8 @@ fn late_line(frames: f64) {
     allocator_trim_line();
     dynamic_wait_line(frames);
     crate::draw::waits_line(frames);
+    #[cfg(feature = "diagnostics")]
+    crate::texture::alias_line(frames);
     crate::watch::port_guard_line(frames);
     crate::port_journal::line(frames);
     crate::port::log(frames);
@@ -7753,12 +7755,16 @@ impl HostList {
             std::collections::hash_map::Entry::Vacant(v) => {
                 v.insert((wanted, wanted, copy));
                 self.changed_something();
+                #[cfg(feature = "diagnostics")]
+                crate::texture::alias_source_moved(texture, wanted);
                 None
             }
             std::collections::hash_map::Entry::Occupied(mut o) => {
                 let before = std::mem::replace(&mut o.get_mut().1, wanted);
                 if before != wanted {
                     self.changed_something();
+                    #[cfg(feature = "diagnostics")]
+                    crate::texture::alias_source_moved(texture, wanted);
                 }
                 (before != wanted).then_some((texture, before))
             }
