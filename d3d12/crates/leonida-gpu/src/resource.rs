@@ -510,6 +510,8 @@ fn twin_texture(
         return None;
     };
     let _ = crate::host::resident(&host.device, &texture);
+    #[cfg(feature = "diagnostics")]
+    crate::census::made(&texture, "colour twins of depth textures");
     crate::host::name(&texture, || {
         format!("depth twin {}x{} f{}", d.width, d.height, d.format)
     });
@@ -571,6 +573,8 @@ fn twin_texture(
         }
         texture.map(|texture| {
             let _ = crate::host::resident(&host.device, &texture);
+            #[cfg(feature = "diagnostics")]
+            crate::census::made(&texture, "colour twins of depth textures");
             crate::host::name(&texture, || {
                 format!("depth plane twin {}x{} f{}", d.width, d.height, d.format)
             });
@@ -2768,6 +2772,14 @@ fn host_texture_as(
         return Err(why);
     }
     let texture = texture.ok_or(NoTexture::Refused)?;
+    #[cfg(feature = "diagnostics")]
+    if reserved {
+        crate::census::made(&texture, "textures given memory level by level");
+    } else if fills(desc) {
+        crate::census::made(&texture, "textures the title fills, of their own");
+    } else {
+        crate::census::made(&texture, "textures the host renders to or writes");
+    }
     crate::host::name(&texture, || {
         format!("texture {}x{} f{} flags {:#x}", d.width, d.height, d.format, d.flags)
     });

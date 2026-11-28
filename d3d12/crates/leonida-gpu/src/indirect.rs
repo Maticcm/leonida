@@ -425,7 +425,12 @@ fn ask_wide(device: &ID3D12Device, groups: u32) -> windows::core::Result<[u32; 4
         let mut made: Option<ID3D12Resource> = None;
         // SAFETY: plain creation of a small buffer.
         unsafe { device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, None, &mut made)? };
-        made.ok_or_else(windows::core::Error::empty)
+        let made = made.ok_or_else(windows::core::Error::empty);
+        #[cfg(feature = "diagnostics")]
+        if let Ok(made) = &made {
+            crate::census::made(made, "buffers of the question about wide dispatches");
+        }
+        made
     };
     // SAFETY: the source and names live through the compile; the root signature is inside the
     // shader; a queue, list and buffers of our own, which nothing else knows; the list is run

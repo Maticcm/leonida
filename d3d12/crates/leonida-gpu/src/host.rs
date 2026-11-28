@@ -273,7 +273,10 @@ pub(crate) fn mapped(device: &ID3D12Device) -> windows::core::Result<()> {
                     None,
                     &mut made,
                 )?;
-                made.ok_or_else(windows::core::Error::empty)
+                let made = made.ok_or_else(windows::core::Error::empty)?;
+                #[cfg(feature = "diagnostics")]
+                crate::census::made(&made, "buffers of the wait for new memory");
+                Ok(made)
             };
             let from = buffer(D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ)?;
             let to = buffer(D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST)?;
@@ -517,11 +520,27 @@ fn bury(finished: u64) {
         retired.drain(..n).collect()
     };
     // Let go of on the reaper thread ([`reaper`]), if there is one.
-    if let Some(tx) = reaper()
-        && let Err(std::sync::mpsc::SendError(Reaped::Objects(done))) = tx.send(Reaped::Objects(done))
-    {
-        drop(done);
+    if let Some(tx) = reaper() {
+        let handed = done.len() as u64;
+        REAPING.fetch_add(handed, Ordering::Relaxed);
+        if let Err(std::sync::mpsc::SendError(Reaped::Objects(done))) = tx.send(Reaped::Objects(done)) {
+            REAPING.fetch_sub(handed, Ordering::Relaxed);
+            drop(done);
+        }
     }
+}
+
+/// Objects handed to the reaper thread ([`reaper`]) that it has not dropped
+/// yet: its line is as long as what is handed to it, and what waits there
+/// holds its memory.
+static REAPING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// For the memory lines: the objects let go that wait for the submissions
+/// that may use them ([`retire`], [`bury_lag`]), and those handed to the
+/// reaper thread and not dropped yet.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn waiting_to_go() -> [u64; 2] {
+    [RETIRED.lock().unwrap_or_else(|e| e.into_inner()).len() as u64, REAPING.load(Ordering::Relaxed)]
 }
 
 /// Whether what the host is done with is let go of on a thread of its own
@@ -569,7 +588,9 @@ fn reaper() -> Option<&'static std::sync::mpsc::Sender<Reaped>> {
                             }
                             Reaped::Objects(objects) => {
                                 let _reaping = crate::timeline::span("reaper: retired objects dropped");
+                                let handed = objects.len() as u64;
                                 drop(objects);
+                                REAPING.fetch_sub(handed, Ordering::Relaxed);
                             }
                         }
                     }
@@ -7308,6 +7329,9 @@ impl HostList {
                         )
                         .ok()?;
                 }
+                if let Some(back) = &back {
+                    crate::census::made(back, "read-back buffers of lists' timestamps");
+                }
                 Some((heap?, back?))
             })
             .as_ref()
@@ -10478,6 +10502,7 @@ impl Host {
     /// A buffer of at least `size` bytes the card writes and we read (a read
     /// back), in the state copies into it need: one a list was done with, if
     /// one of its size is kept ([`read_back_pool`]), else a new one.
+    #[cfg_attr(feature = "diagnostics", track_caller)]
     pub(crate) fn read_back_buffer(&self, size: u64) -> Option<ID3D12Resource> {
         if !read_back_pool() {
             return self.new_read_back_buffer(size);
@@ -10493,6 +10518,7 @@ impl Host {
 
     /// A new buffer of `size` bytes in read-back memory, in the state copies
     /// into it need.
+    #[cfg_attr(feature = "diagnostics", track_caller)]
     fn new_read_back_buffer(&self, size: u64) -> Option<ID3D12Resource> {
         BACKS[0].fetch_add(1, Ordering::Relaxed);
         let heap = D3D12_HEAP_PROPERTIES {
@@ -10524,6 +10550,10 @@ impl Host {
                 &mut buffer,
             )
         };
+        #[cfg(feature = "diagnostics")]
+        if let Some(b) = &buffer {
+            crate::census::made_at(b, "read-back buffers", std::panic::Location::caller());
+        }
         match made {
             Ok(()) => buffer,
             Err(e) => {
@@ -10533,6 +10563,7 @@ impl Host {
         }
     }
 
+    #[cfg_attr(feature = "diagnostics", track_caller)]
     pub(crate) fn upload_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         MADE[0].fetch_add(1, Ordering::Relaxed);
         MADE[1].fetch_add(size, Ordering::Relaxed);
@@ -10572,6 +10603,10 @@ impl Host {
                     b.Map(0, None, Some(&mut data))
                 })
         };
+        #[cfg(feature = "diagnostics")]
+        if let Some(b) = &buffer {
+            crate::census::made_at(b, "upload buffers", std::panic::Location::caller());
+        }
         #[cfg(feature = "diagnostics")]
         if made.is_ok()
             && let Some(b) = &buffer
@@ -11664,6 +11699,7 @@ impl Host {
     /// it is fast too) and shaders read and write: for host copies of title
     /// memory that shaders write, which upload memory cannot be. Starts in
     /// the common state (buffers move out of it implicitly).
+    #[cfg_attr(feature = "diagnostics", track_caller)]
     pub(crate) fn shared_buffer(&self, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         MADE[2].fetch_add(1, Ordering::Relaxed);
         MADE[3].fetch_add(size, Ordering::Relaxed);
@@ -11708,6 +11744,10 @@ impl Host {
                 })
         };
         #[cfg(feature = "diagnostics")]
+        if let Some(b) = &buffer {
+            crate::census::made_at(b, "shared buffers", std::panic::Location::caller());
+        }
+        #[cfg(feature = "diagnostics")]
         if made.is_ok()
             && let Some(b) = &buffer
         {
@@ -11748,6 +11788,7 @@ impl Host {
     /// A buffer in the card's own memory that the CPU maps, shaders read and
     /// (with `written`) may write. The CPU should only write it: a read of the
     /// mapping crosses the bus a few bytes at a time.
+    #[cfg_attr(feature = "diagnostics", track_caller)]
     pub(crate) fn mapped_card_buffer(&self, size: u64, written: bool) -> Option<(ID3D12Resource, *mut u8)> {
         if !self.mapped_card_memory() {
             return None;
@@ -11796,6 +11837,10 @@ impl Host {
                     b.Map(0, None, Some(&mut data))
                 })
         };
+        #[cfg(feature = "diagnostics")]
+        if let Some(b) = &buffer {
+            crate::census::made_at(b, "card buffers the CPU maps", std::panic::Location::caller());
+        }
         match made {
             Ok(()) => Some((buffer?, data.cast())),
             Err(e) => {
@@ -11807,6 +11852,7 @@ impl Host {
 
     /// A device-local buffer shaders may write (unordered access) and indirect
     /// execution may read, starting in the common state.
+    #[cfg_attr(feature = "diagnostics", track_caller)]
     pub(crate) fn uav_buffer(&self, size: u64) -> Option<ID3D12Resource> {
         MADE[4].fetch_add(1, Ordering::Relaxed);
         MADE[5].fetch_add(size, Ordering::Relaxed);
@@ -11842,6 +11888,7 @@ impl Host {
         };
         #[cfg(feature = "diagnostics")]
         if let Some(b) = &buffer {
+            crate::census::made_at(b, "card buffers", std::panic::Location::caller());
             crate::book::made(b, || "an unordered access buffer".into());
         }
         let made = made.and_then(|()| buffer.as_ref().map_or(Ok(()), |b| resident(&self.device, b))).and_then(|()| mapped(&self.device));

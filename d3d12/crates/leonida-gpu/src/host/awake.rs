@@ -163,6 +163,8 @@ fn run(device: &ID3D12Device, wanted: &dyn Fn() -> bool, stop: &AtomicBool) -> w
             &mut sum,
         )?;
         let sum = sum.ok_or_else(windows::core::Error::empty)?;
+        #[cfg(feature = "diagnostics")]
+        crate::census::made(&sum, "the buffer the card is kept awake with");
         let allocator: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE)?;
         let mut lists = Vec::new();
         for _ in 0..2 {

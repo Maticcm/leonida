@@ -528,6 +528,8 @@ fn neutral() -> Option<&'static ID3D12Resource> {
                     )
                     .ok()?;
                 let made = made?;
+                #[cfg(feature = "diagnostics")]
+                crate::census::made(&made, "the grey texture shown for one not there yet");
                 let queue: ID3D12CommandQueue = device
                     .CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC { Type: D3D12_COMMAND_LIST_TYPE_COPY, ..Default::default() })
                     .ok()?;
@@ -3486,6 +3488,23 @@ impl HostHeap {
         if let Some(old) = old {
             crate::host::retire_resource(old);
         }
+    }
+
+    /// For the memory lines (`crate::census::log_slots`): every buffer and
+    /// texture a slot of the heap shows and so keeps alive, once each, with
+    /// how many slots show it. Every slot's lock is taken in turn: not for a
+    /// thread that records.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn kept_now(&self) -> Vec<(ID3D12Resource, u32)> {
+        use windows::core::Interface;
+        let mut found: std::collections::HashMap<usize, (ID3D12Resource, u32)> = std::collections::HashMap::new();
+        for slot in self.kept.iter() {
+            let slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(resource) = slot.as_ref() {
+                found.entry(resource.as_raw() as usize).or_insert_with(|| (resource.clone(), 0)).1 += 1;
+            }
+        }
+        found.into_values().collect()
     }
 
     /// What slot `index` views.

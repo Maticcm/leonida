@@ -179,6 +179,8 @@ fn take(device: &ID3D12Device, count: u32) -> Option<(ID3D12Heap, usize, Vec<(u3
                 heap: made?,
                 free: vec![(0, HEAP_TILES)],
             };
+            #[cfg(feature = "diagnostics")]
+            crate::census::block(&fresh.heap, "blocks of texture levels given on demand");
             STATS[3].fetch_add(u64::from(HEAP_TILES) * TILE, Ordering::Relaxed);
             match pool.iter().position(Option::is_none) {
                 Some(index) => {
