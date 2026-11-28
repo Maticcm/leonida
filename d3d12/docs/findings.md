@@ -592,3 +592,28 @@ each commit naming its source. In short:
 - Belobug: pipeline workers for screen passes, the ambient stand-in's idea, pipeline and
   constant buffer bookkeeping (romainhedouin).
 - ZJOU: render targets not set again; some shader corrections are being looked at.
+
+## Frame-rate switches measured on a six-core PC (2026-11-27)
+
+Ryzen 5 7600X (6 cores, 12 threads), GeForce RTX 4060 Ti 16 GB (driver 616.64), 32 GB of RAM, Series X profile,
+2560x1440 output, the title's upscaler, at one save point with the idle camera (6,000 to 14,000 draws a frame, so
+medians of one run are comparable and medians of two runs only roughly: two runs of the same settings were 75.0
+and 82.1 ms). "A/B" means the switch turned every 20 s inside one run (`LEONIDA_AB`).
+
+| What | How measured | Result |
+|---|---|---|
+| `LEONIDA_PLACED_UNDECLARED` (a copy at its place whose destination no flight declares is the title's own) | A/B, 8 phases | 73.9 ms median with it, 88.5 without; the submitting thread's wait for flights 2 to 4 ms a frame against 6 to 21. On by default. |
+| `LEONIDA_PORT_GUARD`, `LEONIDA_PORT_JOURNAL` | A/B, 22 phases | 83.7 ms with neither, 87.4 with the guard, 91.4 with the journal, 88.9 with both. No gain here; off. |
+| `LEONIDA_JOIN_PARTS` (8 against 1), with thin lists off | A/B, 11 phases | 112.3 against 114.0 ms: none. |
+| `LEONIDA_THIN=0` | one run | 117.1 ms at 9,500 draws, against 95 to 104 at 9,000 to 11,000 with thin lists. Worse; the launcher keeps them on. |
+| `LEONIDA_D3D12_BACKGROUND=0` (the driver's background shader work off) | one run | 118.6 ms at 7,200 draws against about 80. Worse: the card keeps the shaders' first versions. |
+| `LEONIDA_PORT_CONSTANTS=1` (the title's 32-bit graphics heap in place) | one run | 290 ms a frame (3.4 fps): 31,000 fills a frame are read out of that memory on the CPU. Far worse on this card; off. |
+| `LEONIDA_TITLE_GRAPHICS=performance` (the lighter set of the title's own settings) | three runs | 78.6 ms with it, 75.0 and 82.1 without; the draw count does not change at this place. No gain. |
+| Render at 1920x1080 instead of 2560x1440 (`-Resolution 1080`) | one run each | 85.7 ms at 10,200 draws with the card 81% busy at 60 W, against 95 to 104 ms with the card 99% busy at 106 W and 15.6 of 16.4 GB of its memory used. |
+| A run left alone for 13 minutes | medians per minute | 106 to 115 ms in the first three minutes, 94 to 104 from then on: it does not recover further when the driver's background compiling ends. |
+
+What it adds up to on this PC: about 10 ms of frame per 1,000 draws. At 1440p the card and the processor are both
+at their limit; at 1080p the card has room and the frame is the processor's: the process uses 5 to 5.6 of the six
+cores, of which (profile by thread group) the title's own threads take 31 to 41 %, the driver's four background
+compile threads 26 % in the first minutes, the eight list-recording threads 25 to 35 % and the submitting thread
+6 to 8 %, the last being the one thread every submission passes through (about 72 ms of an 87 ms frame).
