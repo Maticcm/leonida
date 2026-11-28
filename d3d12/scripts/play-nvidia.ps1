@@ -18,7 +18,9 @@
 #                  (LEONIDA_FSR_UPSCALER), which is where DLSS takes over.
 # -FrameGen        DLSS frame generation: 2 (twice the frames shown), up to 6 where the card does more (RTX 40: 2).
 #                  It takes depth and motion vectors from the DLSS upscale, so on Series X it turns -Dlss quality on
-#                  unless a mode is given.
+#                  unless a mode is given; with -Resolution, from the G-buffer pass, and it is then on (2) by
+#                  default on RTX 40 and 50 cards when its files are here.
+# -NoFrameGen      no DLSS frame generation (Smooth Motion instead, if the NVIDIA App has it on for leonida_sm.exe)
 # -Aspect          the window's shape: 21:9, 32:9, 16:9, W:H or auto (the screen's). The game still draws 16:9.
 # -PresentScale    fit (the 16:9 picture centred, black bars beside it: the default with -Aspect) or stretch
 # -Quality         fewer stretched/jumping bodies, slower (relay stage 1, no card steps)
@@ -53,6 +55,7 @@ param(
     [ValidateSet('2160', '1440', '1080', '720', '540', '480')][string]$Resolution,
     [ValidateSet('quality', 'balanced', 'performance', 'ultra')][string]$Dlss,
     [ValidateRange(2, 6)][int]$FrameGen,
+    [switch]$NoFrameGen,
     [ValidatePattern('^(auto|\d+(\.\d+)?([:x/]\d+(\.\d+)?)?)$')][string]$Aspect,
     [ValidateSet('fit', 'stretch')][string]$PresentScale,
     [string]$Adapter,
@@ -243,6 +246,14 @@ if ($Resolution) {
 }
 if ($Dlss -and -not $dlssOn) { Write-Host "-Dlss ${Dlss}: no DLSS here (its files, or a build with it): the title's picture is not made by DLSS." }
 if ($FrameGen) { $settings.LEONIDA_FRAME_GEN = "$FrameGen" }
+# Leonida: DLSS frame generation twice the frames shown by default on cards that make it (RTX 40 and 50) when its
+# Streamline files are here and the title upscales by itself (-Resolution: its depth and motion vectors are the
+# G-buffer pass's, fg.rs). Series X at -Resolution 1080 on an RTX 4060 Ti (2026-11-28): 15 frames rendered, 29
+# shown. It generates only while the game's window has the focus. -NoFrameGen leaves it off (Smooth Motion then).
+if (-not $FrameGen -and -not $NoFrameGen -and $Resolution -and -not $RayTracing -and $StreamlineDir) {
+    $card = try { (Get-CimInstance Win32_VideoController -ErrorAction Stop | ForEach-Object { $_.Name }) -join ';' } catch { '' }
+    if ($card -match 'RTX\s*(40|50)\d\d') { $settings.LEONIDA_FRAME_GEN = '2' }
+}
 if ($Aspect) { $settings.LEONIDA_ASPECT = $Aspect }
 if ($PresentScale) { $settings.LEONIDA_PRESENT_SCALE = $PresentScale }
 if ($StreamlineDir) { $settings.LEONIDA_STREAMLINE_DIR = $StreamlineDir }
