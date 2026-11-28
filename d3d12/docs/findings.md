@@ -112,8 +112,12 @@ apart with `LEONIDA_WAVE_WHY=1` and `translate_cdxil`; what each trips on, and w
 
 - **`5dc3b25986622949`, `6f225b641c5b0708`, `926c46bab3b86bd6`** (the water's
   `CS_TransmissionVolumetrics`; 8 x 8 groups of one console wave, 512 bytes of LDS), and four more
-  of the family (`2889c21328c69e58`, `6871d6e4b3ac9a10`, `888af37a584acf98`,
-  `a10179ab7eda0dc3`): a lane's early return (`s_and_saveexec` and `s_cbranch_execz`) around code
+  that trip on the same thing (`2889c21328c69e58`, `6871d6e4b3ac9a10`, `888af37a584acf98`,
+  `a10179ab7eda0dc3`; all seven were taken for one family, but by the entry points in their
+  containers `2889c21328c69e58` is `CS_GenerateShadowMasks_SampleHairScreenSpace` and
+  `888af37a584acf98` `CS_GenerateShadowMasksHairOnly_SampleHairScreenSpace`, the sun's shadow
+  mask where hair is sampled on screen, which the NVIDIA launcher dropped with the water's from
+  cef91163b until it was noticed): a lane's early return (`s_and_saveexec` and `s_cbranch_execz`) around code
   that writes and reads LDS (`ds_write2_b32`, `ds_min_u32`, `ds_max_u32`, `ds_read2_b32`, at
   `0x230` and `0x404`-`0x4c4` of the first) and takes wave reductions and first-lane reads where
   not every lane runs. Thread (0, 0) stores the tile's starting maximum and minimum after those
@@ -371,13 +375,67 @@ tiles unlit, and right in the paired form (cf3394b).
 
 To check, one group at a time (`LEONIDA_PAIRED_FOR=<hash>,<hash>`: the paired form before
 every other for the programs named, only those translated again; `shader_cache.rs`): the
-two looking-glass tile classifications (f83f0ca30c60c3ac, 445c61b3089eb8f0); the four
-approximate temporal resolves; the two `CS_TemporalResolveAlpha`. The paired form takes
-each of these (and the plain tile classifications, `...Mip25` and the tile list), again as
-the translator says, not a card. It does not take the two programs of 256 threads
-(`CS_AlphTransmissionPrefilterMip`, `...DepthTileGenerationMip1`: its host waves would have
-to meet), which keep their form. For the water: `...GenerateTiles` named, with
-`LEONIDA_WATER_TRANSMISSION=1` in the window's environment so that the family runs.
+transparents' tile list and ray pre-passes (`CS_Tiling_Generate_Alpha` a14c1da4be7b9837 and
+`CS_RayPrePass_Alpha_SSR` edb8e66237fc38e6, each host wave on its own as the allocation
+idiom, the kind of form that fork found wrong for its tile list; `CS_RayPrePass_Alpha`
+d2b169b82f67ec5b); the two looking-glass tile classifications (f83f0ca30c60c3ac,
+445c61b3089eb8f0); the four approximate temporal resolves; the two
+`CS_TemporalResolveAlpha`. The paired form takes each of these (and the plain tile
+classifications, `...Mip25` and the water's tile list), again as the translator says, not a
+card. It does not take the two programs of 256 threads (`CS_AlphTransmissionPrefilterMip`,
+`...DepthTileGenerationMip1`: its host waves would have to meet), which keep their form.
+For the water: `...GenerateTiles` named, with `LEONIDA_WATER_TRANSMISSION=1` in the window's
+environment so that the family runs.
+
+**Every compute program of that run by form, and the approximate ones by name
+(2026-11-27).** `translate_cdxil --census` with `LEONIDA_WAVE_WHY=1` (the host settings of
+the NVIDIA run, no card) over the 2,682 of the run's 2,734 compute containers that carry an
+entry point's name. The 81 above came out the same both ways.
+
+| form | programs |
+|---|---|
+| as they are | 2,449 |
+| exact, no group barrier: without skips, without early-outs, without skips with scalars followed | 84, 28, 27 |
+| each host wave on its own, the allocation idiom (counted exact) | 30 (two with exact LDS regions): the batch culls, `CS_Tiling_Generate_Alpha`, `_Opaque` 2cc4c197ee29e291 and `_Water` 5e7cd6d3557a6c35, `CS_RayPrePass_Alpha_SSR`, `CS_RayPrePass_Water` and `_Water_SSR`, `CS_MaterialTilesInitial` bad01f53f53248e5, `CS_DilateDenoiseInfo`, `CS_CollectTriangles*`, the liquid trails, the horizon's vehicle lights, the two `CS_Collision*` |
+| paired lanes | 7: the water's five and the sun's two hair shadow masks (2889c21328c69e58, 888af37a584acf98) |
+| wave-wide | 1: `CS_Visibility` 369cbe906ea72764 |
+| approximate (each half-wave its own results) | 34, below |
+| refused | 22, as counted before |
+
+The 34 approximate ones, grouped by their names (which pass each belongs to was not looked
+up beyond that):
+
+- the sun's shadow mask and what feeds it: `CS_GenerateShadowMasks` bc76c37f9fa3672b,
+  `_HairOnly` 0a5ecfee6b79e13b, `_Raytraced` 12b0005a30bc18a9,
+  `CS_RTConstantCostShadowsTileClassificationNormalCones` 2620618869072a85,
+  `CS_TraceShadowRays_ScreenSpaceOnlyFullRes` eb9a057a81d18c42, `CS_TraceShadowRays_Fullres`
+  4e816e1ef600ddcf;
+- the lights' clusters: `CS_ClusterLightsWorldSpace` d3e5b737ea7cc150 and
+  `...IntensityBased` 55d2bce91ec9abcc (the two that fork names: each half of a cell is given
+  half of the lights);
+- what shades where no ray hit, the irradiance cache and the shader bins:
+  `CS_DeferredFallback_BVH` f8f712930c606707, `_Fallback` 40bc5fd052acfdf4, `_Voxels`
+  294e7cdd91ebd1f1, `CS_DeferredFallbacksAlpha_SkyProbe` b7953a05b189dfc1,
+  `CS_IrradianceCache_Shade` a53a7977fe762268, `_ShadeSecondary` be14e72d86362031,
+  `_IntegrateIrradianceSH` 0a5d4f9047b3dce4, `CS_GenerateShaderBinOffsets` 8dd8d739047fe557;
+- the four temporal resolves of the table above;
+- `CS_ResolveVolumetrics` 89ed0b981f99573c;
+- `CS_Gather` b2711644ca5566cc, `CS_Gather_Reference` 0903802745985664, `CS_GatherDiffusion`
+  ce2378e5e8711aad, `CS_GatherDensityAreaForReadBack` 136986812880cead, `CS_ScanMip0` to `3`
+  (3c196d81eca7ff15, acf14a70f37fb012, f79824724d8e2daf, f0aa2b1e79275592);
+- decals and effects: `CS_ProjDecalResolve_Scalarized` e4a9f58e3acfcf7b and `_Vectorized`
+  c4183d3cbee28e8e, `CS_EntityFireResolve_Scalarized` 2e92491c2ae5472b,
+  `ptfx_CS_lightAtlas_Sprite` 2561af9577c47289 and `_Trail` c06aa62112ffba4c.
+
+Named in `LEONIDA_PAIRED_FOR`, 32 of the 34 take the paired form (not
+`CS_ProjDecalResolve_Scalarized`: a per-lane descriptor written where some lanes may keep
+the old one; not `CS_TraceShadowRays_Fullres`: an LDS operation that form does not take); so
+do the three `CS_Tiling_Generate_*`, the six `CS_RayPrePass_*` and `CS_MaterialTilesInitial`.
+What it costs the card is
+not measured: every per-lane branch is the wave's in that form (252 of them in
+`CS_IrradianceCache_Shade`, 114 in `CS_GenerateShadowMasks`) and each thread does two lanes'
+work; and the two `ptfx_CS_lightAtlas_*` lost the card in the wave-wide form (runs 121-124),
+so they are not the first to name.
 
 ## Static samplers and the pipeline library on NVIDIA (2026-11-27)
 
