@@ -4837,6 +4837,8 @@ fn late_line(frames: f64) {
     #[cfg(feature = "diagnostics")]
     crate::draw::dispatch_sizes_line(frames);
     crate::watch::port_guard_line(frames);
+    #[cfg(feature = "diagnostics")]
+    crate::watch::fault_asks_line(frames);
     crate::port_journal::line(frames);
     crate::port::log(frames);
     crate::port_cbv::log(frames);

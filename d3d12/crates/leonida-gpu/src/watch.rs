@@ -4020,10 +4020,25 @@ fn readable_view(at: usize) -> bool {
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_MAPPED, MEMORY_BASIC_INFORMATION, PAGE_READONLY, PAGE_READWRITE, VirtualQuery,
     };
+    // (A page Windows has in memory that can be shared and read is a view's
+    // or an image's, and is read at the next try either way; of any other the
+    // region says.)
+    if page_ask()
+        && let Some((PAGE_READONLY | PAGE_READWRITE, true)) = page_protection(at)
+    {
+        return true;
+    }
+    #[cfg(feature = "diagnostics")]
+    let began = std::time::Instant::now();
     // SAFETY: plain data filled in by the query.
     let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: a valid out pointer of the right size.
     let n = unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) };
+    #[cfg(feature = "diagnostics")]
+    {
+        fault_count(FA_REGIONS, 1);
+        fault_count(FA_REGIONS_NS, began.elapsed().as_nanos() as u64);
+    }
     n != 0
         && info.State == MEM_COMMIT
         && info.Type == MEM_MAPPED
@@ -4334,6 +4349,8 @@ pub(crate) fn install() {
     };
     unsafe extern "system" fn on_write(info: *mut EXCEPTION_POINTERS) -> i32 {
         let _fault = crate::timeline::span("a fault looked at");
+        #[cfg(feature = "diagnostics")]
+        let _timed = FaultTimed(std::time::Instant::now(), page_ask());
         // SAFETY: the system passes the exception being dispatched.
         let r = unsafe { &*(*info).ExceptionRecord };
         const READ: usize = 0;
@@ -4420,15 +4437,135 @@ pub(crate) fn install() {
     });
 }
 
+/// Whether a fault asks Windows about its one page before it asks about the
+/// region around it (`LEONIDA_PAGE_ASK=0`: the region only, as before).
+///
+/// `VirtualQuery` answers for the whole run of pages around an address that
+/// are alike and walks to the end of it to say how long it is, with the
+/// address space held against every change of protection meanwhile; a title
+/// thread whose write faulted on a block another thread had just opened asks
+/// so ([`writable`]). `QueryWorkingSetEx` says what one page is and walks
+/// nothing. (After KyleS98/VIctory-Neo 0fb1e38.)
+fn page_ask() -> bool {
+    crate::toggled!("LEONIDA_PAGE_ASK")
+}
+
+/// What Windows says of the one page `at` lies in, where it has that page in
+/// memory: its protection, and whether it is a page that can be shared (a
+/// view's). `None`: the page is not in memory (never touched, trimmed,
+/// reserved, free), or Windows would not say; the region says then.
+fn page_protection(at: usize) -> Option<(u32, bool)> {
+    use windows_sys::Win32::System::ProcessStatus::{K32QueryWorkingSetEx, PSAPI_WORKING_SET_EX_INFORMATION};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    #[cfg(feature = "diagnostics")]
+    let began = std::time::Instant::now();
+    // SAFETY: plain data, the address asked about in it.
+    let mut info: PSAPI_WORKING_SET_EX_INFORMATION = unsafe { std::mem::zeroed() };
+    info.VirtualAddress = at as *mut _;
+    // SAFETY: our own process; one record of that size.
+    let ok = unsafe { K32QueryWorkingSetEx(GetCurrentProcess(), std::ptr::from_mut(&mut info).cast(), size_of_val(&info) as u32) } != 0;
+    // SAFETY: every form of the answer is these bits.
+    let flags = unsafe { info.VirtualAttributes.Flags };
+    // Bit 0: the page is in memory; then bits 4 to 14 are its protection and
+    // bit 15 says that it can be shared.
+    let said = (ok && flags & 1 != 0).then(|| (((flags >> 4) & 0x7ff) as u32, flags >> 15 & 1 != 0));
+    #[cfg(feature = "diagnostics")]
+    {
+        fault_count(if said.is_some() { FA_PAGES } else { FA_PAGES_UNSAID }, 1);
+        fault_count(FA_PAGES_NS, began.elapsed().as_nanos() as u64);
+    }
+    said
+}
+
+/// Since the last frame line: what the title's faults asked Windows, and how
+/// long they were looked at. Questions about a region ([`writable`] and
+/// [`readable_view`] with `VirtualQuery`) and their nanoseconds; questions
+/// about one page that the page answered, those it did not, and the
+/// nanoseconds of both; faults looked at with [`page_ask`] off and their
+/// nanoseconds, and the same with it on (all threads).
+#[cfg(feature = "diagnostics")]
+static FAULT_ASKS: [std::sync::atomic::AtomicU64; 9] = [const { std::sync::atomic::AtomicU64::new(0) }; 9];
+#[cfg(feature = "diagnostics")]
+const FA_REGIONS: usize = 0;
+#[cfg(feature = "diagnostics")]
+const FA_REGIONS_NS: usize = 1;
+#[cfg(feature = "diagnostics")]
+const FA_PAGES: usize = 2;
+#[cfg(feature = "diagnostics")]
+const FA_PAGES_UNSAID: usize = 3;
+#[cfg(feature = "diagnostics")]
+const FA_PAGES_NS: usize = 4;
+#[cfg(feature = "diagnostics")]
+const FA_FAULTS: usize = 5;
+
+#[cfg(feature = "diagnostics")]
+fn fault_count(what: usize, n: u64) {
+    FAULT_ASKS[what].fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A fault being looked at by the handler: counted with its time when it is
+/// done, by whether faults ask about their page.
+#[cfg(feature = "diagnostics")]
+struct FaultTimed(std::time::Instant, bool);
+
+#[cfg(feature = "diagnostics")]
+impl Drop for FaultTimed {
+    fn drop(&mut self) {
+        let at = FA_FAULTS + 2 * usize::from(self.1);
+        fault_count(at, 1);
+        fault_count(at + 1, self.0.elapsed().as_nanos() as u64);
+    }
+}
+
+/// The faults' line of the frame lines, per frame ([`FAULT_ASKS`]).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn fault_asks_line(frames: f64) {
+    let n: Vec<f64> = FAULT_ASKS.iter().map(|c| c.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / frames).collect();
+    if n.iter().all(|&v| v == 0.0) {
+        return;
+    }
+    tracing::info!(
+        "the title's faults per frame, all threads (LEONIDA_PAGE_ASK): {:.0} looked at in {:.2} ms asking about regions only, {:.0} in {:.2} ms \
+         asking about the page first; questions about a region {:.0} in {:.3} ms, about one page {:.0} answered and {:.0} not in {:.3} ms",
+        n[FA_FAULTS],
+        n[FA_FAULTS + 1] / 1e6,
+        n[FA_FAULTS + 2],
+        n[FA_FAULTS + 3] / 1e6,
+        n[FA_REGIONS],
+        n[FA_REGIONS_NS] / 1e6,
+        n[FA_PAGES],
+        n[FA_PAGES_UNSAID],
+        n[FA_PAGES_NS] / 1e6,
+    );
+}
+
 /// Whether `at` is committed read-write memory now.
 fn writable(at: usize) -> bool {
+    use windows_sys::Win32::System::Memory::PAGE_READWRITE;
+    if page_ask()
+        && let Some((protection, _)) = page_protection(at)
+    {
+        return protection == PAGE_READWRITE;
+    }
+    writable_region(at)
+}
+
+/// [`writable`], by the region `at` lies in.
+fn writable_region(at: usize) -> bool {
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_READWRITE, VirtualQuery,
     };
+    #[cfg(feature = "diagnostics")]
+    let began = std::time::Instant::now();
     // SAFETY: plain data filled in by the query.
     let mut info: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
     // SAFETY: a valid out pointer of the right size.
     let n = unsafe { VirtualQuery(at as *const _, &mut info, size_of_val(&info)) };
+    #[cfg(feature = "diagnostics")]
+    {
+        fault_count(FA_REGIONS, 1);
+        fault_count(FA_REGIONS_NS, began.elapsed().as_nanos() as u64);
+    }
     n != 0 && info.State == MEM_COMMIT && info.Protect == PAGE_READWRITE
 }
 
@@ -5815,6 +5952,72 @@ mod tests {
         let top = usize::MAX - 16;
         writing(top, PAGE);
         title_memory_remapped(top, usize::MAX);
+    }
+
+    /// What Windows says of one page is what the region around it says of
+    /// it: a committed page that can be written, one that can only be read
+    /// and one that is only reserved, in private memory and in a view; of a
+    /// page it does not have in memory the region is asked.
+    /// (`LEONIDA_PAGE_ASK`.)
+    #[test]
+    fn a_fault_asks_about_its_one_page() {
+        use windows_sys::Win32::System::Memory::{PAGE_READONLY, VirtualProtect};
+        const KERNEL_PAGE: usize = 4096;
+        let protect = |at: usize, to: u32| {
+            let mut old = 0;
+            // SAFETY: a committed page of the test's own.
+            assert_ne!(unsafe { VirtualProtect(at as *const _, KERNEL_PAGE, to, &mut old) }, 0);
+        };
+        // SAFETY: four pages reserved, the first three committed; freed at the end.
+        let p = unsafe { VirtualAlloc(std::ptr::null(), 4 * KERNEL_PAGE, MEM_RESERVE, PAGE_READWRITE) } as usize;
+        assert_ne!(p, 0);
+        // SAFETY: inside the reservation.
+        assert_ne!(unsafe { VirtualAlloc(p as *const _, 3 * KERNEL_PAGE, MEM_COMMIT, PAGE_READWRITE) } as usize, 0);
+        let (written, read_only, untouched, reserved) = (p, p + KERNEL_PAGE, p + 2 * KERNEL_PAGE, p + 3 * KERNEL_PAGE);
+        // SAFETY: committed pages of ours.
+        unsafe {
+            (written as *mut u8).write(1);
+            (read_only as *mut u8).write(1);
+        }
+        protect(read_only, PAGE_READONLY);
+        assert_eq!(page_protection(written), Some((PAGE_READWRITE, false)));
+        assert_eq!(page_protection(read_only), Some((PAGE_READONLY, false)));
+        // (Committed and never touched: not in memory, unless Windows brought
+        // it in beside its neighbour.)
+        assert!(matches!(page_protection(untouched), None | Some((PAGE_READWRITE, false))));
+        assert_eq!(page_protection(reserved), None);
+        for (at, can) in [(written, true), (read_only, false), (untouched, true), (reserved, false)] {
+            assert_eq!(writable(at), can, "page {}", (at - p) / KERNEL_PAGE);
+            assert_eq!(writable_region(at), can, "page {} by its region", (at - p) / KERNEL_PAGE);
+        }
+        assert!(!readable_view(written), "private memory is no view");
+        // Made writable again, as a fault of another thread opens a block.
+        protect(read_only, PAGE_READWRITE);
+        assert_eq!(page_protection(read_only), Some((PAGE_READWRITE, false)));
+        assert!(writable(read_only));
+        // SAFETY: our allocation.
+        unsafe { VirtualFree(p as *mut _, 0, MEM_RELEASE) };
+
+        // A view, as title memory is: read-only as a guard leaves it, and open again.
+        let (section, one, two) = two_views(BLOCK);
+        // SAFETY: the views just mapped.
+        unsafe {
+            (one as *mut u8).write(1);
+            assert_eq!((two as *const u8).read(), 1);
+        }
+        assert_eq!(page_protection(one), Some((PAGE_READWRITE, true)));
+        assert!(writable(one) && readable_view(one));
+        // (A page of the view nothing touched.)
+        assert!(matches!(page_protection(one + KERNEL_PAGE), None | Some((PAGE_READWRITE, true))));
+        assert!(writable(one + KERNEL_PAGE) && readable_view(one + KERNEL_PAGE));
+        protect(one, PAGE_READONLY);
+        assert_eq!(page_protection(one), Some((PAGE_READONLY, true)));
+        assert!(!writable(one) && !writable_region(one) && readable_view(one));
+        assert!(writable(two), "the other view of the page is as it was");
+        protect(one, PAGE_READWRITE);
+        assert_eq!(page_protection(one), Some((PAGE_READWRITE, true)));
+        assert!(writable(one));
+        drop_views(section, &[one, two], BLOCK);
     }
 }
 
