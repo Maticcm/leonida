@@ -115,6 +115,22 @@ $settings = @{
     # title's culling and tessellation dispatches clamped their arguments before they were written: the sea's surface
     # and its tiled resolve went missing for a frame (sand or black blocks), 6 times in 271 frames; with 1, none in 441.
     LEONIDA_INDIRECT_BATCH = '1'; LEONIDA_MAP_THREADS = '1'; LEONIDA_TITLE_PRIORITIES = '0'; LEONIDA_CARD_AWAKE = '1'
+    # Leonida: the copy behind an aliased view (an R9G9B9E5 view the title places in an R32_UINT texture shaders
+    # write: 86 copies, 390 MiB a frame) goes from texture to texture, not through a buffer: the same texels, moved
+    # once. Standing at one save, Series X, 1440p, RTX 4060 Ti (2026-11-28): the copies 3.6 -> 1.9 ms of a timing
+    # run's frame; switched in turns of 4 s (LEONIDA_AB) the frame is 2.6 ms shorter with it (+-0.9, of 78); every
+    # frame of the standard moves saved both ways shows the same picture (513 and 547 frames).
+    LEONIDA_ALIAS_DIRECT = '1'
+    # Leonida: the sun's tiled cascade shadows (CS_ShadowRenderTiledCascadesCB and ...AlphaCB) in the paired form
+    # (one host wave of 32 threads for a console wave of 64, no group barriers) instead of the form the chain gives
+    # them (without skips, scalars followed: exact, with group barriers). Same place and card: their two lines of a
+    # timing run 2.5 -> 1.2 to 1.6 ms together (two runs each way); left out in turns of 3.5 s they are 2.9 ms of
+    # the frame as they were (+-0.6) and 1.3 ms paired (+-0.5); the shadows on the deck, the fence and the player
+    # look the same in every frame of the standard moves (526 frames, in daylight). Only those two programs are
+    # translated again. Not here, until a frame with projected decals has been compared: the decals' tile
+    # classification 1f1fbd86759b3da2, which the paired form takes from 2.9 ms to 0.03 (timing runs; 2.3 ms of the
+    # frame to nothing when left out in turns).
+    LEONIDA_PAIRED_FOR = 'be6ce5d849d51127,922e1d0ee1e19a85'
     # Leonida: the light stand-in stays on while the rays are off (below). Off, with every ray missing, shade went
     # black and the sky white (run n1, 453 frames); on, the same view is lit as on the console. What the title left
     # is kept up to 2 times the estimate (ambient.rs).
