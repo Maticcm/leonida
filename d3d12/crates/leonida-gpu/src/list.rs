@@ -218,10 +218,10 @@ impl Detached {
     }
 }
 
-/// A host list that has run and waits to be used again, and the bytes of
-/// upload memory it keeps.
+/// A host list that has run and waits to be used again, the bytes of
+/// upload memory it keeps, and when it was put by (`crate::host::now_ms`).
 #[cfg(windows)]
-struct Idle(crate::host::HostList, u64);
+struct Idle(crate::host::HostList, u64, u64);
 
 // SAFETY: D3D12 objects are free-threaded, and an idle list is touched by
 // nobody until it is taken out again.
@@ -247,6 +247,13 @@ static IDLE: std::sync::Mutex<(Vec<Idle>, u64)> = std::sync::Mutex::new((Vec::ne
 #[cfg(windows)]
 const IDLE_MOST: (usize, u64) = (512, 256 << 20);
 
+/// How many of the first of `put_by` (when each idle list was put by, the
+/// oldest first) are more than `max_age` old at `now`.
+#[cfg(any(windows, test))]
+fn stale(put_by: impl Iterator<Item = u64>, now: u64, max_age: u64) -> usize {
+    put_by.take_while(|&t| now.saturating_sub(t) > max_age).count()
+}
+
 /// Whether host lists that have run are used again (on by default;
 /// `LEONIDA_LIST_POOL=0`: each is made new and thrown away, as before).
 #[cfg(windows)]
@@ -262,13 +269,13 @@ fn fresh_list() -> Option<crate::host::HostList> {
     let idle = {
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
         let taken = idle.0.pop();
-        if let Some(Idle(_, bytes)) = &taken {
+        if let Some(Idle(_, bytes, _)) = &taken {
             idle.1 -= bytes;
         }
         taken
     };
     match idle {
-        Some(Idle(list, _)) => Some(list),
+        Some(Idle(list, _, _)) => Some(list),
         None => crate::host::host().and_then(|h| h.new_list().ok()),
     }
 }
@@ -295,8 +302,24 @@ pub(crate) fn recycle(lists: Vec<Detached>, ran: &[usize]) {
         let bytes = host.scratch_kept();
         let mut idle = IDLE.lock().unwrap_or_else(|e| e.into_inner());
         if idle.0.len() < IDLE_MOST.0 && idle.1 + bytes <= IDLE_MOST.1 {
-            idle.0.push(Idle(host, bytes));
+            let now = crate::host::now_ms();
+            idle.0.push(Idle(host, bytes, now));
             idle.1 += bytes;
+            // (`LEONIDA_ALLOCATOR_TRIM=1`) Lists the frames did not need for
+            // that long are let go, with their allocators: the pool is last
+            // in, first out, so its oldest are the surplus of a spike, and
+            // nothing resets them again. Their submissions have run, as
+            // every idle list's (one the full pool turns away goes the same
+            // way).
+            if let Some(secs) = crate::host::allocator_trim() {
+                let n = stale(idle.0.iter().map(|i| i.2), now, secs * 1000);
+                let gone: Vec<Idle> = idle.0.drain(..n).collect();
+                idle.1 -= gone.iter().map(|i| i.1).sum::<u64>();
+                crate::host::ALLOCATOR_TRIMS[2].fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                // Released outside the lock.
+                drop(idle);
+                drop(gone);
+            }
         }
     }
 }
@@ -2794,6 +2817,18 @@ mod tests {
     /// A 2D texture's [`Shape`].
     fn flat(format: u32, side: u32, levels: u32) -> Shape {
         Shape { format, width: u64::from(side), height: side, depth_or_array: 1, levels, volume: false }
+    }
+
+    /// (`LEONIDA_ALLOCATOR_TRIM`) The idle lists let go are the oldest put
+    /// by, those older than the trim's time; the pool is in that order.
+    #[test]
+    fn the_oldest_idle_lists_are_the_stale_ones() {
+        assert_eq!(stale([0, 10_000, 29_000, 40_000].into_iter(), 40_000, 30_000), 1);
+        assert_eq!(stale([0, 5_000, 9_000, 40_000].into_iter(), 40_000, 30_000), 3);
+        assert_eq!(stale([20_000, 40_000].into_iter(), 40_000, 30_000), 0);
+        // (Exactly that old is not yet stale; the one just put by never is.)
+        assert_eq!(stale([10_000, 40_000].into_iter(), 40_000, 30_000), 0);
+        assert_eq!(stale(std::iter::empty(), 40_000, 30_000), 0);
     }
 
     /// After edsuuu/VI-BR-PORT 7377418.

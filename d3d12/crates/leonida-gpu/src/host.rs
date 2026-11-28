@@ -1313,7 +1313,9 @@ const BATCHES: u32 = 8;
 
 /// A host command list and its allocator, always used together.
 pub(crate) struct HostList {
-    allocator: ID3D12CommandAllocator,
+    /// With when it was made ([`now_ms`]): [`allocator_trim`] takes an old
+    /// one anew at the list's reset.
+    allocator: Mutex<(ID3D12CommandAllocator, u64)>,
     pub(crate) list: ID3D12GraphicsCommandList,
     /// Work for submission time, in recorded order.
     deferred: Mutex<Deferred>,
@@ -1332,7 +1334,7 @@ pub(crate) struct HostList {
     twins: Mutex<ByCopy<TwinUse>>,
     /// The list that runs those transitions just before this one, made
     /// when the list first has such transitions ([`lazy_prelude`]).
-    prelude: OnceLock<Option<Prelude>>,
+    prelude: OnceLock<Option<ListPrelude>>,
     /// The pipelines the list binds, for reports of slow submissions.
     pipelines: std::sync::Arc<Mutex<std::collections::BTreeSet<String>>>,
     /// What its indirect executions ran, for the report of a removed device.
@@ -1373,6 +1375,15 @@ pub(crate) struct HostList {
 
 /// A list's prelude: an allocator and a closed list.
 type Prelude = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
+
+/// A host list's own prelude: its allocator with when it was made
+/// ([`now_ms`]), as the list's own ([`allocator_trim`]).
+type ListPrelude = (Mutex<(ID3D12CommandAllocator, u64)>, ID3D12GraphicsCommandList);
+
+/// A prelude just made, as a host list keeps it.
+fn list_prelude((allocator, list): Prelude) -> ListPrelude {
+    (Mutex::new((allocator, now_ms())), list)
+}
 
 /// Whether a host list's prelude is made when the list first needs one. A
 /// prelude runs the texture transitions and twin copies a list needs before
@@ -2315,6 +2326,113 @@ fn take_batch_scratch() -> Option<ID3D12Resource> {
     let made = host()?.uav_buffer(BATCH_SCRATCH)?;
     name(&made, || format!("indirect batches {BATCH_SCRATCH:#x}"));
     Some(made)
+}
+
+/// Whether host command allocators are taken anew now and then
+/// (`LEONIDA_ALLOCATOR_TRIM=1`; off by default), and after how many seconds
+/// (`LEONIDA_ALLOCATOR_TRIM_S`, 30, 5 to 3600).
+///
+/// A D3D12 command allocator never gives back the memory of the most its
+/// list ever recorded into it: a list that once took a loading frame's
+/// commands keeps that for the run. In the play session of 2026-11-27 here
+/// 1,589 host lists alive stood for about 5.5 GB of the process's private
+/// memory; where the switch comes from, 1,600 allocators (host lists and
+/// their preludes) held about 2.3 GB.
+///
+/// With the switch a list's reset, and a prelude before it records again
+/// (the only moments its allocator holds nothing that runs), takes a new
+/// allocator when the one it has is that old, and the old one goes behind
+/// the submissions still running ([`retire`]). Host lists that waited idle
+/// for that long go too, with their allocators (`crate::list`'s pool: the
+/// lists a spike left over are at its bottom and are not reset again). A
+/// title's list that it does not reset keeps its allocator: only resets
+/// swap.
+///
+/// What it costs: a new allocator grows again as its list records, a few
+/// calls into the driver each time, for every list once in that many
+/// seconds. Off until a run says what the memory lines and the frame times
+/// make of it.
+///
+/// Ported from trustno1-coder/VIctory-NVIDIA 64d4931 (`VICTORY_ALLOCATOR_TRIM`;
+/// there the memory stack by skornuta, skornuta/victory-memory-stack
+/// 57fb136, patches 13 and 17).
+pub(crate) fn allocator_trim() -> Option<u64> {
+    #[cfg(test)]
+    if let Some(secs) = TEST_ALLOCATOR_TRIM.get() {
+        return Some(secs);
+    }
+    static S: OnceLock<Option<u64>> = OnceLock::new();
+    *S.get_or_init(|| {
+        std::env::var_os("LEONIDA_ALLOCATOR_TRIM")
+            .is_some_and(|v| v == "1")
+            .then(|| allocator_trim_secs(std::env::var("LEONIDA_ALLOCATOR_TRIM_S").ok().as_deref()))
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's [`allocator_trim`], for its thread only.
+    static TEST_ALLOCATOR_TRIM: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// [`allocator_trim`]'s seconds for a value of `LEONIDA_ALLOCATOR_TRIM_S`.
+fn allocator_trim_secs(value: Option<&str>) -> u64 {
+    value.and_then(|v| v.trim().parse().ok()).unwrap_or(30u64).clamp(5, 3600)
+}
+
+/// Whether an allocator made at `made` is taken anew at `now` (both
+/// [`now_ms`]) with a trim of `secs` seconds.
+fn allocator_old(made: u64, now: u64, secs: u64) -> bool {
+    now.saturating_sub(made) >= secs * 1000
+}
+
+/// Since the last frame-rate line: host lists' allocators and preludes'
+/// allocators taken anew, and idle host lists let go ([`allocator_trim`]).
+pub(crate) static ALLOCATOR_TRIMS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// With [`allocator_trim`]: `allocator`, made at `made`, is replaced by a
+/// new one if it is old enough, and the old one is retired. Whether it was
+/// (the new one needs no reset). To be called only where the allocator's
+/// last commands have run. Without the switch: nothing, false.
+fn allocator_refresh(allocator: &mut ID3D12CommandAllocator, made: &mut u64, which: usize) -> bool {
+    let Some(secs) = allocator_trim() else {
+        return false;
+    };
+    let now = now_ms();
+    if !allocator_old(*made, now, secs) {
+        return false;
+    }
+    // The old one serves on if no new one is to be had, and is asked about
+    // again that much later.
+    *made = now;
+    let Some(host) = host() else {
+        return false;
+    };
+    // SAFETY: plain object creation.
+    let fresh: windows::core::Result<ID3D12CommandAllocator> =
+        unsafe { host.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT) };
+    let Ok(fresh) = fresh else {
+        return false;
+    };
+    retire(std::mem::replace(allocator, fresh));
+    ALLOCATOR_TRIMS[which].fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// For the frame-rate line: what [`allocator_trim`] did since the last one,
+/// if anything.
+fn allocator_trim_line() {
+    let t: Vec<u64> = ALLOCATOR_TRIMS.iter().map(|t| t.swap(0, Ordering::Relaxed)).collect();
+    if t.iter().all(|&n| n == 0) {
+        return;
+    }
+    tracing::info!(
+        "command allocators taken anew since the last line (LEONIDA_ALLOCATOR_TRIM=1): {} of host lists at their resets, {} of preludes; \
+         {} idle host lists let go",
+        t[0],
+        t[1],
+        t[2]
+    );
 }
 
 /// For the frame-rate line: what [`batch_pool`] did per frame, if a batch
@@ -4666,6 +4784,7 @@ fn late_line(frames: f64) {
     card_steps::log(frames);
     read_backs_line(frames);
     batch_scratch_line(frames);
+    allocator_trim_line();
     dynamic_wait_line(frames);
     crate::draw::waits_line(frames);
     crate::watch::port_guard_line(frames);
@@ -5135,7 +5254,7 @@ impl Host {
             )?;
             let prelude = OnceLock::new();
             if !lazy_prelude() {
-                let _ = prelude.set(self.make_prelude());
+                let _ = prelude.set(self.make_prelude().map(list_prelude));
             }
             #[cfg(feature = "diagnostics")]
             let notes = std::sync::Arc::<Mutex<Vec<Note>>>::default();
@@ -5161,7 +5280,7 @@ impl Host {
                 );
             }
             Ok(HostList {
-                allocator,
+                allocator: Mutex::new((allocator, now_ms())),
                 list,
                 deferred: Mutex::default(),
                 scratch: Mutex::default(),
@@ -7573,11 +7692,15 @@ impl HostList {
             };
             give_batches(given);
         }
-        // SAFETY: the list is not executing.
-        let reset = unsafe {
-            self.allocator
-                .Reset()
-                .and_then(|()| self.list.Reset(&self.allocator, None))
+        let reset = {
+            let mut allocator = self.allocator.lock().unwrap_or_else(|e| e.into_inner());
+            let (allocator, made) = &mut *allocator;
+            // (`LEONIDA_ALLOCATOR_TRIM=1`: an old allocator is taken anew
+            // here, where it holds nothing that runs.)
+            let fresh = allocator_refresh(allocator, made, 0);
+            // SAFETY: the list is not executing; a fresh allocator is new
+            // and empty.
+            unsafe { (if fresh { Ok(()) } else { allocator.Reset() }).and_then(|()| self.list.Reset(&*allocator, None)) }
         };
         if let Err(e) = reset {
             fail(format_args!("a host command list did not reset ({e})"));
@@ -7981,15 +8104,21 @@ impl HostList {
         }
         let Some((allocator, list)) = self
             .prelude
-            .get_or_init(|| host().and_then(|h| h.make_prelude()))
+            .get_or_init(|| host().and_then(|h| h.make_prelude()).map(list_prelude))
             .as_ref()
         else {
             fail(format_args!("no host list for a state prelude"));
         };
+        let mut allocator = allocator.lock().unwrap_or_else(|e| e.into_inner());
+        let (allocator, made) = &mut *allocator;
+        // (`LEONIDA_ALLOCATOR_TRIM=1`: an old allocator is taken anew here,
+        // before the prelude records again.)
+        let fresh = allocator_refresh(allocator, made, 1);
+        let allocator = &*allocator;
         // SAFETY: the prelude is not executing (every submission is waited
-        // for); the textures are live.
+        // for); the textures are live; a fresh allocator is new and empty.
         let recorded = unsafe {
-            allocator.Reset().and_then(|()| {
+            (if fresh { Ok(()) } else { allocator.Reset() }).and_then(|()| {
                 list.Reset(allocator, None)?;
                 if !aliasing.is_empty() {
                     list.ResourceBarrier(&aliasing);
@@ -9028,6 +9157,55 @@ mod batch_scratch_tests {
         assert_eq!(batches_kept(7, 0, 1024), 0);
         // A buffer holds eight batches of 256 records of 32 bytes.
         assert_eq!(BATCH_SCRATCH, 65_536);
+    }
+
+    /// (`LEONIDA_ALLOCATOR_TRIM`) An allocator is taken anew once it is as
+    /// old as the switch's seconds, which are 30 unless said, 5 to 3600.
+    #[test]
+    fn an_allocator_is_old_after_the_trims_seconds() {
+        assert_eq!(allocator_trim_secs(None), 30);
+        assert_eq!(allocator_trim_secs(Some(" 120 ")), 120);
+        assert_eq!(allocator_trim_secs(Some("1")), 5);
+        assert_eq!(allocator_trim_secs(Some("86400")), 3600);
+        assert_eq!(allocator_trim_secs(Some("soon")), 30);
+        assert!(!allocator_old(1_000, 30_999, 30));
+        assert!(allocator_old(1_000, 31_000, 30));
+        // (A clock read before the allocator's making is not after it.)
+        assert!(!allocator_old(5_000, 1_000, 30));
+    }
+
+    /// (`LEONIDA_ALLOCATOR_TRIM`) A list reset while its allocator is not
+    /// old keeps it; reset once it is old, the list has a new one, records
+    /// into it, closes and is reset again as any list.
+    #[test]
+    fn a_reset_takes_an_old_allocator_anew() {
+        let Some(host) = host() else {
+            eprintln!("no D3D12 device; the allocator trim not tested");
+            return;
+        };
+        let list = host.new_list().unwrap();
+        let allocator = |l: &HostList| l.allocator.lock().unwrap().0.as_raw() as usize;
+        let first = allocator(&list);
+        TEST_ALLOCATOR_TRIM.set(Some(3600));
+        list.close();
+        list.reset();
+        assert_eq!(allocator(&list), first, "not old yet");
+        // (A trim of no seconds: every allocator is old.)
+        TEST_ALLOCATOR_TRIM.set(Some(0));
+        let trims = ALLOCATOR_TRIMS[0].load(Ordering::Relaxed);
+        list.close();
+        list.reset();
+        let second = allocator(&list);
+        assert_ne!(second, first, "a new allocator");
+        assert!(ALLOCATOR_TRIMS[0].load(Ordering::Relaxed) > trims);
+        // SAFETY: an open list.
+        unsafe { list.list.ClearState(None) };
+        list.close();
+        TEST_ALLOCATOR_TRIM.set(None);
+        list.reset();
+        assert_eq!(allocator(&list), second, "without the switch: the one it has");
+        list.close();
+        list.reset();
     }
 
     /// A list's scratch buffers of batched clamps are its own until it is
