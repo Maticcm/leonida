@@ -2909,6 +2909,48 @@ enum Step {
 /// What a list does on the CPU when it is submitted: copies between host
 /// memory regions (title buffers, upload buffers and buffer copies), and
 /// the upload buffers its GPU commands read, kept until the list is reset.
+/// Runs of addresses, joined where they meet or overlap.
+#[derive(Default)]
+pub(crate) struct Spans(std::collections::BTreeMap<u64, u64>);
+
+impl Spans {
+    /// Adds `[start, end)`.
+    pub(crate) fn add(&mut self, start: u64, end: u64) {
+        if end <= start {
+            return;
+        }
+        let (mut start, mut end) = (start, end);
+        // The run that begins before `start` and reaches it takes the new one in.
+        if let Some((&s, &e)) = self.0.range(..start).next_back()
+            && e >= start
+        {
+            if e >= end {
+                return;
+            }
+            start = s;
+        }
+        // Every run that begins inside (or right at the end) is joined to it.
+        let inside: Vec<u64> = self.0.range(start..=end).map(|(&s, _)| s).collect();
+        for s in inside {
+            if let Some(e) = self.0.remove(&s) {
+                end = end.max(e);
+            }
+        }
+        self.0.insert(start, end);
+    }
+
+    /// Whether any byte of `[start, end)` is in a run.
+    pub(crate) fn touches(&self, start: u64, end: u64) -> bool {
+        // (The runs do not overlap: only the last one that begins before `end` can reach in.)
+        end > start && self.0.range(..end).next_back().is_some_and(|(_, &e)| e > start)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runs(&self) -> Vec<(u64, u64)> {
+        self.0.iter().map(|(&s, &e)| (s, e)).collect()
+    }
+}
+
 #[derive(Default)]
 struct Deferred {
     /// Destination, source, bytes.
@@ -2938,6 +2980,9 @@ struct Deferred {
     textures: std::collections::HashSet<usize, std::hash::BuildHasherDefault<AddressHash>>,
     /// Last GPU source copied into each aliased host texture in this list.
     texture_aliases: ByCopy<usize>,
+    /// The title memory shaders of this list may write through buffer views
+    /// ([`HostList::shaders_write`]), since its reset.
+    shader_spans: Spans,
     /// Of them, those the list's prelude copies into their host copies if
     /// the submission finds them changed ([`HostList::upload_in_prelude`]).
     prelude_uploads: Vec<crate::texture::PreludeUpload>,
@@ -8334,6 +8379,21 @@ impl HostList {
                 .copies
                 .push(Step::Refresh(shadow.clone(), address, len));
         }
+    }
+
+    /// Shaders recorded in this list may write `[address, address + len)` of title memory
+    /// through a buffer view (`crate::shadow::Shadow::gpu_writes` says so of every view a
+    /// storing shader is bound for unordered access, before it decides what is copied back):
+    /// kept until the list is reset, for [`HostList::shaders_wrote`]. Only kept where it is
+    /// asked (`crate::draw::batch_spans`).
+    pub(crate) fn shaders_write(&self, address: u64, len: u64) {
+        self.deferred().shader_spans.add(address, address.saturating_add(len));
+    }
+
+    /// Whether shaders recorded in this list so far may have written any of
+    /// `[address, address + len)` of title memory ([`HostList::shaders_write`]).
+    pub(crate) fn shaders_wrote(&self, address: u64, len: u64) -> bool {
+        self.deferred().shader_spans.touches(address, address.saturating_add(len))
     }
 
     /// Shaders of the list write `[address, address + len)` of a buffer's

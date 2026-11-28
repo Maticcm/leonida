@@ -638,13 +638,71 @@ fn in_place_order() -> bool {
 /// dispatches the title runs side by side (its tile classes, up to 92 at a
 /// time) are not held up by waits of ours. Off: whether the title has ways
 /// to wait that do not pass through its lists' methods is not known.
+///
+/// `LEONIDA_INDIRECT_BATCH=3`: a batch ends for an execution only if shaders recorded since its
+/// pass may have written that execution's record. A dispatch or a storing draw marks the batch;
+/// an execution after the mark reads its record from the batch unless the record's bytes lie in
+/// memory this list has declared as written by shaders ([`HostList::shaders_wrote`]: every
+/// buffer view a storing shader is given for unordered access is declared when it is bound,
+/// which is what copying the writes back to the title rests on already). Then a new batch is
+/// opened behind those shaders, as with 1. So the title's culling passes still end the batch
+/// for the executions that read what they wrote (which 2 got wrong: the sea's surface missing
+/// for a frame), and the many dispatches that store elsewhere (skinning, impostor transforms,
+/// particles: 82 % of 1,500 direct dispatches a frame can store to buffers) end none. Neither
+/// the title's waits nor its draws end a batch here: the pass's own waits are for what was
+/// recorded before it, and what is recorded after it is told apart by address.
+/// Standing at the waterside save on an RTX 4060 Ti (2026-11-28): 1,150 batch passes a frame
+/// with 1; with 2 switched in turns of 4 s the frame is 6.5 ms shorter (+-0.8, of 78).
 fn batches() -> u8 {
+    // (`LEONIDA_AB=<s>,LEONIDA_INDIRECT_BATCH_2` or `..._3`: 2 or 3 while that switch is on,
+    // so that one run measures it against the setting in one scene.)
+    #[cfg(feature = "diagnostics")]
+    {
+        if crate::ab::pick("LEONIDA_INDIRECT_BATCH_3") == Some(true) {
+            return 3;
+        }
+        if crate::ab::pick("LEONIDA_INDIRECT_BATCH_2") == Some(true) {
+            return 2;
+        }
+    }
+    batches_set()
+}
+
+/// `LEONIDA_INDIRECT_BATCH`'s value ([`batches`]), read once.
+fn batches_set() -> u8 {
     static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
     *ON.get_or_init(|| match std::env::var("LEONIDA_INDIRECT_BATCH").as_deref() {
         Ok("0") => 0,
         Ok("2") => 2,
+        Ok("3") => 3,
         _ => 1,
     })
+}
+
+/// Whether lists keep what their shaders may write ([`HostList::shaders_write`]): with
+/// `LEONIDA_INDIRECT_BATCH=3`, or while `LEONIDA_AB` can turn it on.
+pub(crate) fn batch_spans() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        #[cfg(feature = "diagnostics")]
+        if crate::ab::bit("LEONIDA_INDIRECT_BATCH_3").is_some() {
+            return true;
+        }
+        batches_set() == 3
+    })
+}
+
+/// Whether an execution cannot read its record from the open batch ([`batches`], by its
+/// setting `mode`): `wrote`, shaders that can store to buffers were recorded since the batch's
+/// pass; `record_written`, this list has declared the record's bytes as written by shaders.
+/// With 1 (and 0) no batch stays open past such shaders, so one that is (the setting changed
+/// while the title ran) ends; with 2 only the title's waits and draws end it.
+fn batch_stale(mode: u8, wrote: bool, record_written: impl FnOnce() -> bool) -> bool {
+    match mode {
+        2 => false,
+        3 => wrote && record_written(),
+        _ => wrote,
+    }
 }
 
 /// The records clamped by the pass opened last ([`batches`]).
@@ -652,7 +710,7 @@ struct Batch {
     table: crate::indirect::batch::Table,
     scratch: ID3D12Resource,
     /// Dispatches since, which may have written arguments
-    /// (`LEONIDA_INDIRECT_BATCH=2`).
+    /// (`LEONIDA_INDIRECT_BATCH=2` and `3`).
     wrote: bool,
 }
 
@@ -5128,7 +5186,7 @@ impl State {
     /// from here on.
     fn buffers_written(&mut self) {
         match &mut self.batch {
-            Some(batch) if batches() == 2 => batch.wrote = true,
+            Some(batch) if batches() >= 2 => batch.wrote = true,
             batch => *batch = None,
         }
     }
@@ -5154,7 +5212,11 @@ impl State {
     /// if its shaders can store to buffers).
     fn drew(&mut self, p: Option<&HostPipeline>) {
         if p.is_none_or(|p| p.stages.iter().any(|stage| stage.translated().stores)) {
-            self.batch = None;
+            // (With 3 a known pipeline's stores are told apart by address, as a dispatch's.)
+            match &mut self.batch {
+                Some(batch) if p.is_some() && batches() == 3 => batch.wrote = true,
+                batch => *batch = None,
+            }
         }
     }
 
@@ -5190,7 +5252,8 @@ impl State {
 
     /// The title waits for earlier work (a barrier or a pipeline sync).
     pub(crate) fn synced(&mut self) {
-        if self.batch.as_ref().is_some_and(|b| b.wrote) {
+        // (Not with 3: there an execution's own record says whether the batch has it.)
+        if batches() != 3 && self.batch.as_ref().is_some_and(|b| b.wrote) {
             self.batch = None;
         }
     }
@@ -5205,6 +5268,7 @@ impl State {
         arguments: u64,
         kind: u32,
         pack: u32,
+        len: u64,
     ) -> Option<(ID3D12Resource, u64)> {
         const BATCH_USE: usize = usize::MAX - 0x78;
         const DISPATCH: u32 = 2;
@@ -5217,7 +5281,9 @@ impl State {
             self.synced();
         }
         let (id, offset) = (args.id(), args.offset(arguments));
+        // (`len` bytes at `arguments`: the record, for `LEONIDA_INDIRECT_BATCH=3`.)
         if let Some(b) = &mut self.batch
+            && !batch_stale(batches(), b.wrote, || list.shaders_wrote(arguments, len))
             && let Some(at) = b.table.place_packed(id, offset, kind, pack)
         {
             return Some((b.scratch.clone(), at));
@@ -5352,7 +5418,7 @@ impl State {
         // One record without a count: clamped in a batch (`batches`).
         let batch = if !alone && batches() > 0 && max == 1 && count.is_none() {
             args.refresh(list, arguments, len);
-            self.batched(list, &args, arguments, kind, pack_k)
+            self.batched(list, &args, arguments, kind, pack_k, len)
         } else {
             None
         };
@@ -5590,6 +5656,64 @@ fn compute_word(p: &HostPipeline, kind: u32) -> Option<(u32, u32)> {
     let (param, _) = stage.user_data?;
     let word = stage.translated().host.user_data.iter().find(|u| u.root == RootType::Other(kind))?;
     Some((param, word.index))
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::batch_stale;
+    use crate::host::Spans;
+
+    /// With 3 an execution leaves the open batch only when shaders recorded since its pass may
+    /// have written the execution's own record; 2 never asks (its batches end at the title's
+    /// waits and draws), and with 1 no batch is open past such shaders.
+    #[test]
+    fn a_batch_ends_for_a_record_shaders_may_have_written_since_its_pass() {
+        // 3: nothing recorded since the pass that stores: the record is not even looked up
+        assert!(!batch_stale(3, false, || panic!("not asked")));
+        // 3: storing shaders since, elsewhere: the batch has the record
+        assert!(!batch_stale(3, true, || false));
+        // 3: storing shaders since, and the record lies where shaders of the list write
+        assert!(batch_stale(3, true, || true));
+        assert!(!batch_stale(2, true, || panic!("not asked")));
+        assert!(batch_stale(1, true, || panic!("not asked")));
+        assert!(!batch_stale(1, false, || panic!("not asked")));
+    }
+
+    /// The ranges a list's shaders may write are joined where they meet, and a record is
+    /// written if any of its bytes is in one.
+    #[test]
+    fn written_ranges_are_joined_and_a_record_in_any_of_them_is_found() {
+        let mut spans = Spans::default();
+        assert!(!spans.touches(0, u64::MAX));
+        spans.add(100, 200);
+        spans.add(300, 400);
+        spans.add(50, 60);
+        assert_eq!(spans.runs(), [(50, 60), (100, 200), (300, 400)]);
+        // records before, between, at the edges, inside and across
+        assert!(!spans.touches(0, 50));
+        assert!(!spans.touches(60, 100));
+        assert!(!spans.touches(200, 300));
+        assert!(!spans.touches(400, 420));
+        assert!(spans.touches(59, 61));
+        assert!(spans.touches(199, 220));
+        assert!(spans.touches(280, 301));
+        assert!(spans.touches(120, 140));
+        assert!(spans.touches(0, 1000));
+        // an empty record and an empty range are nothing
+        assert!(!spans.touches(120, 120));
+        spans.add(250, 250);
+        assert_eq!(spans.runs().len(), 3);
+        // a range inside one changes nothing; one that bridges two joins them; one that
+        // ends where another begins is joined to it
+        spans.add(120, 130);
+        assert_eq!(spans.runs(), [(50, 60), (100, 200), (300, 400)]);
+        spans.add(150, 320);
+        assert_eq!(spans.runs(), [(50, 60), (100, 400)]);
+        spans.add(60, 100);
+        assert_eq!(spans.runs(), [(50, 400)]);
+        spans.add(0, 1000);
+        assert_eq!(spans.runs(), [(0, 1000)]);
+    }
 }
 
 #[cfg(test)]
