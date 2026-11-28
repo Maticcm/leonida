@@ -166,6 +166,10 @@ $settings = @{
     # pages with a new byte 41 -> 6.6 MB, "copying back" 30-40 -> 10-12 ms. The standard moves captured with it on:
     # 338 frames, one with a one-frame dip or spike, the picture as before (run x36).
     LEONIDA_WC_NO_BACK = '1'
+    # Leonida: the diag build's walk of the whole address space for its "memory map" log line is left out of play:
+    # 285,000 regions asked of Windows one by one took a thread 1.06 s every 30 s (2026-11-27), beside the title's
+    # own mapping calls. -More @{LEONIDA_MEMORY_MAP='1'} has the line again.
+    LEONIDA_MEMORY_MAP = '0'
 }
 $console = if ($SeriesX) { 'series-x' } else { 'series-s' }
 # The render scale of each DLSS mode (rendered lines over output lines; the layer picks DLSS's own mode by it).
