@@ -12,8 +12,8 @@ Some tests open files through absolute paths compiled into them (the GLSL test s
 runtime/build/generated). For those, the drive of --windows-root is pointed at --root in the Wine prefix for the run
 ($WINEPREFIX, else ~/.wine), unless that drive is already in use there.
 
-Every test is reported. The exit code is 1 if a test named by --require fails or is missing, else 0: the
-others show what does and doesn't work under Wine yet without failing the job.
+Every test is reported. Each name given to --require must be listed and all of its tests must pass, or the
+exit code is 1. The other results show what does and doesn't work under Wine yet without failing the job.
 --timeout caps each process; a shorter positive CTest TIMEOUT takes precedence for that test.
 Relative executable paths in --wine or WINE are read from the directory where you start this runner.
 
@@ -21,11 +21,13 @@ Each test gets WINEDLLOVERRIDES with winedbg.exe and winemenubuilder.exe disable
 waiting in the debugger until the timeout; an entry of the caller's or the test's for the same program wins. One
 wineserver is kept alive for the whole run (`wineserver -p`: $WINESERVER, else the one next to the --wine command,
 else the one on PATH) and stopped at the end, instead of a new one starting for every test.
+Separate runs under Wine must use different prefixes or run one after the other.
 --jobs N runs N tests at a time. Tests marked RUN_SERIAL run alone, tests sharing a RESOURCE_LOCK never overlap, and
 DEPENDS and fixtures are kept; the report is in the same order as with --jobs 1 (the default).
 """
 import argparse
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import ExitStack, contextmanager
 from graphlib import CycleError, TopologicalSorter
 import json
 import math
@@ -67,6 +69,30 @@ def map_path(arg: str, windows_root: str, root: str) -> str | None:
     if a.lower().startswith(prefix.lower()):
         return os.path.join(root, *a[len(prefix):].split("/"))
     return None
+
+
+@contextmanager
+def prefix_ownership(prefix: str):
+    """Keep another runner from sharing this run's temporary drive or kept server."""
+    if os.name != "posix":
+        yield None  # Native Windows only runs the synthetic harness tests.
+        return
+
+    import fcntl
+
+    with ExitStack() as cleanup:
+        try:
+            os.makedirs(prefix, mode=0o700, exist_ok=True)
+            # Lock the directory itself so aliases share one lock, with no stale lock file after an interruption.
+            fd = os.open(prefix, os.O_RDONLY | os.O_DIRECTORY)
+            cleanup.callback(os.close, fd)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield f"a Wine test runner is already running in {prefix}; use another WINEPREFIX or retry after it ends"
+        except OSError as exc:
+            yield f"cannot lock Wine prefix {prefix}: {exc.strerror or exc}"
+        else:
+            yield None
 
 
 class DriveMap:
@@ -190,6 +216,14 @@ class KeptServer:
         except (OSError, subprocess.TimeoutExpired):
             return None
 
+    def _warmup(self) -> None:
+        env = dict(os.environ, WINEDLLOVERRIDES=merge_dll_overrides(os.environ.get("WINEDLLOVERRIDES")))
+        try:
+            subprocess.run(self.wine + ["wineboot"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, env=env, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            pass                          # the tests start the services then, as without a kept server
+
     def __enter__(self):
         if not self.command:
             self.note = "no wineserver found: each test starts its own"
@@ -200,18 +234,14 @@ class KeptServer:
                 code = self._run("-p")
             else:
                 self.note = "a wineserver already runs for this prefix: used and left running"
+                self._warmup()
                 return self
         self.started = code == 0
         if not self.started:
             self.note = f"could not start {self.command} -p: each test starts its own server"
             return self
         self.note = "wineserver kept alive for the run"
-        env = dict(os.environ, WINEDLLOVERRIDES=merge_dll_overrides(os.environ.get("WINEDLLOVERRIDES")))
-        try:
-            subprocess.run(self.wine + ["wineboot"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, env=env, timeout=120)
-        except (OSError, subprocess.TimeoutExpired):
-            pass                          # the tests start the services then, as without a kept server
+        self._warmup()
         return self
 
     def __exit__(self, *exc):
@@ -515,7 +545,7 @@ def main() -> int:
     ap.add_argument("--root", type=os.path.abspath, default=ROOT, help="the Linux checkout (default: this repository)")
     ap.add_argument("--wine", type=wine_command, default=os.environ.get("WINE", "wine"),
                     help="Wine command (default: $WINE or wine)")
-    ap.add_argument("--require", action="append", default=[], help="a test that must pass (repeatable)")
+    ap.add_argument("--require", action="append", default=[], help="a test name whose entries must all pass (repeatable)")
     ap.add_argument("--timeout", type=positive_seconds, default=120.0,
                     help="maximum seconds per test; a shorter CTest TIMEOUT applies (default 120)")
     ap.add_argument("--jobs", type=positive_int, default=1,
@@ -546,7 +576,6 @@ def main() -> int:
     # Each test starts in its own CTest working directory. Keep bare commands on PATH.
     if os.path.dirname(wine[0]) and not os.path.isabs(wine[0]):
         wine[0] = os.path.join(os.getcwd(), wine[0])
-    results = {}
     results_by_index: dict[int, str] = {}
     prefix = os.environ.get("WINEPREFIX") or os.path.join(os.path.expanduser("~"), ".wine")
     outcomes: dict[int, tuple[str, str]] = {}
@@ -557,13 +586,18 @@ def main() -> int:
 
     def report(index: int) -> None:
         status, detail = outcomes[index]
-        results[names[index]] = status
         print(f"[{status.upper()}] {names[index]}", flush=True)
         if status != "pass":
             for line in detail.rstrip().splitlines()[-40:]:
                 print(f"    {line}")
 
-    with DriveMap(args.windows_root, args.root, prefix) as drive, KeptServer(find_wineserver(wine), wine) as server:
+    with ExitStack() as run:
+        lock_error = run.enter_context(prefix_ownership(prefix))
+        if lock_error:
+            print(f"ERROR: {lock_error}", file=sys.stderr)
+            return 2
+        drive = run.enter_context(DriveMap(args.windows_root, args.root, prefix))
+        server = run.enter_context(KeptServer(find_wineserver(wine), wine))
         print(drive.note, flush=True)
         print(server.note, flush=True)
         if args.jobs == 1:
@@ -574,11 +608,12 @@ def main() -> int:
         else:
             run_parallel(tests, order, before, args.jobs, run_one, outcomes, results_by_index, report)
 
-    missing = list(dict.fromkeys(n for n in args.require if n not in results))
-    failed_required = [n for n in args.require if results.get(n) != "pass"]
-    counts = {s: sum(1 for v in results.values() if v == s) for s in ("pass", "fail", "skip")}
+    missing = list(dict.fromkeys(n for n in args.require if n not in indices))
+    nonpassing_names = {names[index] for index, status in results_by_index.items() if status != "pass"}
+    failed_required = [n for n in args.require if n not in indices or n in nonpassing_names]
+    counts = {s: sum(1 for v in results_by_index.values() if v == s) for s in ("pass", "fail", "skip")}
     print(f"\n{counts['pass']} passed, {counts['fail']} failed, {counts['skip']} skipped under Wine "
-          f"({len(results)} tests)")
+          f"({len(results_by_index)} tests)")
     for n in missing:
         print(f"required test not listed by the Windows build: {n}")
     if failed_required:
@@ -591,7 +626,8 @@ def main() -> int:
                 f.write(f"### Windows tests under {args.label or 'Wine'}\n\n")
                 f.write(f"{counts['pass']} passed, {counts['fail']} failed, {counts['skip']} skipped.\n\n")
                 f.write("| Test | Result | Required |\n|---|---|---|\n")
-                for name, status in results.items():
+                for index in order:
+                    name, status = names[index], results_by_index[index]
                     f.write(f"| `{name}` | {status} | {'yes' if name in args.require else ''} |\n")
                 for name in missing:
                     # The job fails on these, so the table must name them, not only the log.

@@ -530,6 +530,32 @@ class TestCli(unittest.TestCase):
             with open(out, encoding="utf-8") as fh:
                 self.assertEqual(fh.read(), "previous report\n")
 
+    def test_unlistable_folder_case_alias_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src_dir, locked, xml = self._locked_tree(tmp)
+            out = os.path.join(locked, "names.csv")
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write("previous report\n")
+            alias = os.path.join(src_dir, "LOCKED", "names.csv")
+            original_isfile = os.path.isfile
+            original_compare = names_mod.same_report_path
+
+            def isfile(path):
+                return path == alias or original_isfile(path)
+
+            def compare(first, second):
+                if first == os.path.dirname(alias) and second == locked:
+                    return True  # emulate a case-insensitive volume
+                return original_compare(first, second)
+
+            with mock.patch.object(names_mod.os.path, "isfile", side_effect=isfile), \
+                    mock.patch.object(names_mod, "same_report_path", side_effect=compare):
+                code, err = self._run_with_locked_folder(src_dir, locked, xml, alias)
+            self.assertEqual(code, 2, err)
+            self.assertIn("cannot list", err)
+            with open(out, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "previous report\n")
+
     def test_unlistable_sub_folder_gives_the_same_result_whether_or_not_the_report_exists(self):
         # An --out outside the unlistable folder is not refused by the check, so the run does not depend on
         # whether a report is already there: the scan stops on the folder with exit 1 both times and leaves an
@@ -697,6 +723,43 @@ class TestReportErrors(unittest.TestCase):
                     self.assertIn(bad_csv, err)
                     self.assertIn("row 2", err)
                     self.assertFalse(os.path.exists(out))
+
+    def test_publish_cleans_up_staged_file_when_replace_fails_even_if_readonly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "report.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"initial": 1}\n')
+            os.chmod(path, 0o444)
+
+            real_unlink = os.unlink
+
+            def windows_strict_unlink(p):
+                mode = os.stat(p).st_mode
+                if not (mode & 0o200):
+                    raise PermissionError(13, f"Access is denied: {p}")
+                return real_unlink(p)
+
+            with mock.patch.object(names_mod, "replace_retry", side_effect=OSError(13, "Permission denied")), \
+                 mock.patch("os.unlink", side_effect=windows_strict_unlink):
+                with self.assertRaises(OSError):
+                    names_mod.write(path, [], [], {})
+
+            leftover = [f for f in os.listdir(tmp) if f.startswith(".bink_names-")]
+            self.assertEqual(leftover, [])
+
+    def test_publish_applies_published_mode_on_windows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "report_win.json")
+            chmod_calls = []
+            real_chmod = os.chmod
+
+            def track_chmod(p, mode):
+                chmod_calls.append((p, mode))
+                real_chmod(p, mode)
+
+            with mock.patch("os.name", "nt"), mock.patch("os.chmod", side_effect=track_chmod):
+                names_mod.write(path, [], [], {})
+            self.assertTrue(len(chmod_calls) > 0)
 
 
 if __name__ == "__main__":
