@@ -617,3 +617,41 @@ at their limit; at 1080p the card has room and the frame is the processor's: the
 cores, of which (profile by thread group) the title's own threads take 31 to 41 %, the driver's four background
 compile threads 26 % in the first minutes, the eight list-recording threads 25 to 35 % and the submitting thread
 6 to 8 %, the last being the one thread every submission passes through (about 72 ms of an 87 ms frame).
+
+### What a frame waits for there, and what moved it (later the same night)
+
+The same PC, profile and save. All game starts for these were muted in the Windows mixer (the game's own session)
+and unmuted before they were stopped.
+
+**Standing, the frame is the card's.** A timeline of 20 frames (`LEONIDA_TIMELINE`, 96 ms a frame) has the card
+running submissions for 80 of the 96 ms and idle for 16; the chain a present came out of is 56 to 59 ms of the card
+and 17 ms of the title's own threads, 5 ms of threads woken and not yet running, 3 to 4 ms of write faults. Three
+submissions a frame take about 30, 28 and 17 ms of the card, the dozen others 1 to 2 ms each. No thread of the
+process is busy for more than 45 % of the time (the submitting thread 41 %, two of the title's 38 %, the eight
+list threads 21 to 35 %), with 5.9 cores' worth in use and 17 % of it in the kernel.
+
+**The card's time is spread, not in a few programs.** A timing run (`LEONIDA_GPU_TIMING=1` with
+`LEONIDA_D3D12_DRED=1`, every command between two timestamps): 78 to 85 ms a frame in 1,565 kinds of command;
+indirect executions 47 to 52 ms in 9,567 commands (5 µs each), direct dispatches 18 to 20 ms in 1,574, mesh
+dispatches 6 to 7 ms in 2,300, the copies behind aliased textures 4.2 to 4.6 ms in 86, plain draws 2 ms. The
+forty heaviest kinds make 44 ms of it; the heaviest single programs are compute passes of 1 to 4 ms
+(`CS_ProjDecalReduceClassification` 4.3, `CS_ShadowRenderTiledCascadesCB` 3.8, `CS_Gather_Classified_0` 2.7,
+`CS_TAA2_Resolve` 1.5). Rendering 1080 lines instead of 1440 took 10 to 15 % off the frame (above), so less than
+half of the card's time follows the pixel count. What makes an indirect execution cost 5 µs on this card is not
+found; the frame replay (`replay/`) is where to ask.
+
+| What | How measured | Result |
+|---|---|---|
+| `LEONIDA_REMAP_SPANS` (a texture refresh waits only for a change of mapping that touches its own memory) | A/B of 15 s phases while walking and turning, 25 phases | mean 153.3 -> 129.5 ms, median 117.2 -> 103.1, p90 305.1 -> 230.5. Of 130 to 320 named reads a frame, 6 to 128 went on beside a change and none waited. Standing: no change (the lock is held 5 to 13 ms a frame there). On by default. |
+| `LEONIDA_BATCH_SCRATCH_POOL` (lists share the scratch buffers of their batched clamps) | one standing run each way, 4.5 minutes in the world | the card's memory in use that no line counted 3,587 MB and rising -> 1,347 MB and level; "card buffers" made 7,165 -> 5,592 MB; host textures made again after being let go 1,700 -> 357; 150 buffers a frame taken from 170 to 200 kept, none made. In the 13-minute session before it the uncounted memory reached 5.0 GB and the card stayed at its budget of 14.3 GB. On by default. |
+| `LEONIDA_THIN_THREADS=6` with `LEONIDA_UNDER_THREADS=4` | one standing run | not comparable: the title streamed through the measurement (192 ms a frame of mapping changes held, frames of 160 to 580 ms). To be run again as an A/B. |
+
+While the title streams (the idle camera is enough: 850 to 1,600 pages of 64 KiB mapped a second) the mapping
+thread holds title memory for 90 to 270 ms of a frame in single holds of 45 to 70 ms, and each page costs it 0.4
+to 3 ms, nearly all of it in the kernel's unmapping (`ZwUnmapViewOfSectionEx` is 47 % of that thread's running
+samples, `NtMapViewOfSectionEx` 10 %). Whether the title would stream that much on the console at rest is not
+known; its texture read-backs (18 a frame) are where its streaming decisions come from.
+
+The sampling profiler (`LEONIDA_PROFILE`) must not be given the title's own threads
+(`LEONIDA_PROFILE_ONLY=leonida-image`): walking one of their stacks faulted in `ntdll` 23 s into the window and
+took the process down (log s3-prof). The timeline's sampler does not walk them and is safe.
