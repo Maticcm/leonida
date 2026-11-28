@@ -64,8 +64,9 @@ the loading screen of the story load ([the route](docs/first_run_ui.md#through-t
 
 **The Direct3D 12 runtime, [`d3d12/`](d3d12/README.md) (Windows, NVIDIA and AMD), is playable in the world.**
 It is a separate program (`leonida.exe`) that grew from VIctory; what follows are this project's own measurements,
-taken by the maintainer on 2026-11-27 with the branch state of that day (commit `37426fd9f`), not figures quoted
-from another project:
+taken by the maintainer on 2026-11-27, not figures quoted from another project. They are of the working branch of
+that day (commit `37426fd9f`, which has a fix for waits on the graphics card that is not on `main` yet); `main`
+itself measured about 10 frames a second at the same place earlier that day (median frame about 102 ms):
 
 - PC: Ryzen 5 7600X (6 cores), GeForce RTX 4060 Ti 16 GB (driver 616.64), 32 GB of RAM, Windows 11.
 - Series X profile, 2560x1440 picture, the title's own upscaler at render scale 1, no generated frames.
