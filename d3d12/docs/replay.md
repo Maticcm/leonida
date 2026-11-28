@@ -135,6 +135,12 @@ The `--diverge` family runs the recorded copies without the merge.
 
 ## Limits
 
+- A capture in the title's world did not finish on a PC of 32 GB with an RTX 4060 Ti (2026-11-28, two tries, at
+  125 s and 270 s after the device was made): the card's memory was written in 3 s (5.8 GB), the changes between
+  submissions then took over 40 s (1.8 GB, about 45 MB/s), and after 45 s without a frame a thread of the title's
+  own ends the process (a write to address 0 at image +0x23cf683), so no `frame.bin` was written. The first try
+  also had 1.1 GB of commit left on the PC. To capture there, the pass over what the CPU changed has to be
+  faster, or that thread held for the time.
 - Not recorded, but reported when used: reserved (tiled) resources, bundles,
   ray tracing, render passes, enhanced barriers, predication, stream output,
   `ClearUnorderedAccessView`, shading rate, newer creation methods
