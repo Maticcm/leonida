@@ -670,3 +670,90 @@ kept copy of the autosave container in place before each start and the player's 
 The sampling profiler (`LEONIDA_PROFILE`) must not be given the title's own threads
 (`LEONIDA_PROFILE_ONLY=leonida-image`): walking one of their stacks faulted in `ntdll` 23 s into the window and
 took the process down (log s3-prof). The timeline's sampler does not walk them and is safe.
+
+## The card's compute passes, aliased views and batch passes (2026-11-28)
+
+The same PC (RTX 4060 Ti, Series X profile, 2560x1440), every start from one copy of the autosave (a deck at the
+waterside, in daylight), standing. Three things first, about measuring there:
+
+- **The idle camera goes round three views of about 24 s each** (8,500, 12,500 and 14,700 draws; 71, 79 and 81 to
+  90 ms a frame), and the same view costs a few ms more or less at another time. An A/B in turns of 15 s is as long
+  as the views and measures them, not the switch (residual 3 to 4 ms a phase). Turns of 3.5 to 4 s, the phases
+  cut into stretches wherever the draw count jumps, the first phase of a stretch left out and a level fitted for
+  every stretch, give a switch's effect to +-0.5 ms in seven minutes.
+- **A program left out says what it costs** (`LEONIDA_AB=<s>,LEONIDA_SKIP_TRY_A` with `LEONIDA_SKIP_TRY_A=<hashes>`).
+  For the heavy compute programs the lines of a timing run are what they cost in the frame: left out,
+  `CS_ProjDecalReduceClassification_Scalarized` makes the frame 2.3 ms shorter (+-0.55; its line 2.9 to 3.1 ms),
+  the two `CS_ShadowRenderTiledCascades` programs 2.9 ms (+-0.56; their lines 2.5 together, and which of the two
+  has the larger line changes from run to run: only their sum means something), `CS_ProjDecalResolve_Vectorized`
+  with `CS_GenerateShadowMasks_HairOnly` 0.45 ms (+-0.57; lines 1.0).
+- Phase medians pile up at 71.4 ms in the lightest view (15 of 45 phases of one run, to the tenth of a ms), and go
+  below it with enough taken off the card (65 ms). What holds frames there is not found; means were fitted too.
+
+### The form each heavy compute program gets on 32-lane waves, and what the forms cost
+
+`LEONIDA_WAVE_WHY=1` on the 24 heaviest compute programs of a timing run, each translated alone into a scratch
+cache. Seventeen translate as they are (`CS_FinalGather_*`, `CS_Gather_Classified_*`, `CS_UpdateParticles`,
+`CS_ScreenProbes_*`, `CS_GenerateShadowMasks_Checkerboard_NoHair`, `CS_GenerateMaterialMasks`,
+`CS_ReconstructRaymarchClassifiedFull`, `CS_BatchCullInitArgs` and others), `CS_TAA2_Resolve` as it is with the
+entry ticket of an 8 x 8 group. The others, ms a frame in timing runs (two runs where two numbers stand):
+
+| program | form the chain gives | ms | paired (`LEONIDA_PAIRED_FOR`) | wave-wide (`LEONIDA_WAVE_WIDE_FOR`) |
+|---|---|---|---|---|
+| `CS_ProjDecalReduceClassification_Scalarized` 1f1fbd86759b3da2 | without skips, scalars followed (exact, group barriers: 134, most in loops) | 2.85, 3.14 | 0.03, under 0.02 | not tried: the first form takes it |
+| `CS_ShadowRenderTiledCascadesCB` be6ce5d849d51127 and `...AlphaCB` 922e1d0ee1e19a85 | the same | 2.48, 2.56 together | 1.60, 1.17 together | not tried |
+| `CS_ProjDecalResolve_Vectorized` c4183d3cbee28e8e | local waves (APPROXIMATE, any mask), without early-outs | 0.53, 0.53 | 0.09 | 36.8 (the frame 96 ms) |
+| `CS_GenerateShadowMasks_HairOnly` 0a5ecfee6b79e13b | the same | 0.47, 0.53 | 0.24 | 0.87 |
+| `CS_DrawBatch` f8f50ab85e7b10bb | without skips (exact) | 0.55 | refused (an LDS operation) | - |
+
+So the forms differ by far more than a factor: the group barriers of the exact forms are what costs (3 ms for a
+program the paired form runs in 0.03, 37 ms for one in the wave-wide form), and the paired form, which has none,
+is the cheapest of all, cheaper than the approximate one. Whole frames: 70.5 to 71.7 ms in a timing run with the
+chain's forms, 67.9 to 68.3 with all five paired, 67.0 with the first three. Left out in turns in a run with the
+five paired, the classification is no longer anything of the frame (+1.0 ms +-0.5 when it is left out), the two
+shadow programs 1.3 ms (+-0.5, from 2.9) and the last two 0.8 (+-0.6, from 0.45: no difference).
+
+Every frame of the standard moves was saved with the five paired and with none (526 and 513 frames): the scene,
+its shadows on the deck, the fence and the player look the same, and the frames the scan flags (4 and 2) are the
+roof beam passing a camera that looks up, and two darker frames the run without has too. No projected decal is
+in view there, so the decal programs' pictures are not compared: the launcher names the two shadow programs only.
+
+`LEONIDA_LOOPS_WAVE=1` would change four of the 24 (1f1fbd86759b3da2, f8f50ab85e7b10bb, c4183d3cbee28e8e,
+0a5ecfee6b79e13b: 28, 1, 52 and 1 loop branches taken by each host wave together). In a timing run with
+it the frame is 71.2 ms (70.5 to 71.7 without) and the four lines are 2.87, 0.48, 0.53 and 0.47 ms (3.14, 0.56,
+0.53 and 0.53 without): none of them is slower or faster for it.
+
+### The copies behind aliased views
+
+All 59 aliased views at this place are R9G9B9E5 views the title places in R32_UINT textures its shaders write
+(eleven of 2560x1440, eight of 1280x720, a 2048x2048, cubes, four-level atlases). 86 copies a frame of 57 views,
+390 MiB, each through a buffer: 3.6 ms of a timing run's frame, and with no copy made at all
+(`LEONIDA_EXP_NO_ALIAS_COPY`, in turns) the frame is 3.1 ms shorter (+-1.3). Direct3D copies R32_UINT into
+R9G9B9E5 texel for texel, so the buffer is not needed (`LEONIDA_ALIAS_DIRECT=1`, tested on the card): 1.9 to 2.0
+ms in a timing run, and in turns of 4 s the frame 2.6 ms shorter (+-0.9). The launcher sets it.
+
+Of the 86 copies 53 are a list's first read of the view with the source as the list found it, 21 follow a write
+by the list and 11 another write in the same list; none is made twice in a list without a write between. But by
+view the copies outnumber the writes: a 2048x2048 view is copied 4.1 times a frame for 0.9 writes of its source,
+seven 2560x1440 views every frame for sources written every other frame, two more 2.0 and 1.9 times for 0.5.
+About 150 of the 390 MiB a frame copy a source nothing wrote since the view's last copy, in another list or the
+frame before. Two ways on: leave such a copy out at submission (the list's prelude can decide in submission
+order, as it does for depth twins), or make no copy: an R32_UINT texture made with R9G9B9E5 among its castable
+formats (`CreateCommittedResource3`) can be read through the view itself, which is all of the 1.9 ms left.
+
+### Batch passes and direct dispatches
+
+- The pass that clamps a batch of indirect records runs 1,150 times a frame (`LEONIDA_INDIRECT_BATCH=1`): 4.8 ms
+  of a timing run's frame as a command of its own (4.1 us each). With `2` (a batch ends only at the title's waits
+  and draws) in turns of 4 s the frame is 6.5 ms shorter (+-0.8) with 450 to 600 passes: about 10 us of the frame
+  a pass. `2` is not usable (it clamps records before the title's culling passes write them). Without the pass's
+  wait for every earlier shader write the frame is the same (+0.3 +-0.3 ms; waiting for its sources only -0.1): the
+  wait is not what costs. `3` (a batch ends for an execution only if shaders recorded since its pass are bound to
+  memory its record lies in) is exact by what the list declares and takes off 0.8 ms (+-0.5): the passes stay at
+  1,020 to 1,170, as most records lie in memory some storing shader of the list has bound (root views reach to
+  the end of their buffer). What a dispatch writes has to be known per dispatch, not per list, to get further.
+- 1,520 to 1,660 direct dispatches a frame: 46 % run one group, 19 % 2 to 16, 19 % 17 to 256, 12 % 257 to 4,096,
+  4 % more; 82 % have a program that can store to buffers (which is what ends batches). The layer records no wait
+  and no pass of its own around a direct dispatch. Their 16 to 17 ms of a timing run are not the many: the 830
+  under 5 us each (463 of them `CS_ComputeImposterTransform`, 0.5 us each) are 0.9 ms together, 15 kinds over 200
+  us each are 6.6 ms and 42 kinds of 50 to 200 us 4.2 ms: the screen-sized passes.
