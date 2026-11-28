@@ -125,6 +125,16 @@ $settings = @{
     # clocks and the next submission starts slow (a captured frame of 30 ms took 38 to 40 with waits between its
     # submissions). '1' in -More: kept awake, as before.
     LEONIDA_CARD_AWAKE = '0'
+    # Leonida: a store of the title's that faults on a guarded block is done beside the guard (through our own view
+    # of the page) and the block stays read-only, instead of two changes of protection for it (titlewrite.rs; a
+    # store that is not understood, or a block's fifth, opens the block as before). The same save and PC, in turns
+    # of 4 s: standing at 1440 lines -0.6 ms (+-0.3; means -0.9), standing at 1080 lines -2.4 (+-0.3; means -2.2),
+    # walking and turning at 1440 lines -1.9 (+-0.9), -0.9 (+-1.6) and -1.6 (+-1.5) in three runs. 1.4 to 1.7 million
+    # stores a run done so and 56,000 to 75,000 not understood (those open the block); no "title memory not written"
+    # in any run; every frame of the standard moves saved both ways (553 and 571 frames): the frames the scan flags
+    # with it (6 against 2) are a fast turn past a white house and the sky, with nothing missing in them.
+    # '0' in -More: every faulting store opens its block, as before.
+    LEONIDA_STORE_BESIDE = '1'
     # Leonida: the copy behind an aliased view (an R9G9B9E5 view the title places in an R32_UINT texture shaders
     # write: 86 copies, 390 MiB a frame) goes from texture to texture, not through a buffer: the same texels, moved
     # once. Standing at one save, Series X, 1440p, RTX 4060 Ti (2026-11-28): the copies 3.6 -> 1.9 ms of a timing
