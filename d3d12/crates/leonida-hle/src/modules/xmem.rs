@@ -1734,7 +1734,7 @@ impl Op {
         let Some(slice) = &self.slice else {
             return true;
         };
-        show(self.at, PAGE, slice, self.own)
+        show(self.at, PAGE, slice, self.own, true)
     }
 }
 
@@ -1920,13 +1920,59 @@ mod pool {
     }
 }
 
-/// Maps `slice` and the slices after it over `[base, base + len)`, which
-/// must lie in one placeholder.
+/// Maps `slice` and the slices after it over `[base, base + len)`: one
+/// placeholder, or several that follow on. A view takes the place of
+/// exactly one placeholder, and pages mapped one by one before left one
+/// each: the host refused the run over them and the title got null. Those
+/// are joined first (`MEM_COALESCE_PLACEHOLDERS`); where the host will not
+/// join them (several reservations), the run goes in a page at a time.
+///
+/// Ported from Op-lite/OP-lite e5e7120 (there after CGBJ's main and fork
+/// codec_d 9af81bc2), as Trex/Dolores' op-lite branch carries it.
 fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     let own = physical.holes.remove(&base) == Some(len) && lean();
-    if !show(base, len, &slice, own) {
+    if show(base, len, &slice, own, len <= PAGE) {
+        note_view(physical, base, len, slice);
+        return true;
+    }
+    if len <= PAGE {
         return false;
     }
+    const MEM_COALESCE_PLACEHOLDERS: u32 = 1;
+    static JOINED: AtomicU64 = AtomicU64::new(0);
+    if JOINED.fetch_add(1, Ordering::Relaxed) < 4 {
+        tracing::info!(
+            address = format_args!("{base:#x}"),
+            pages = len / PAGE,
+            "a run of physical pages did not fit one placeholder: those under it are joined first"
+        );
+    }
+    // The run's ends cut out of what holds them, then all between joined.
+    split(base, PAGE);
+    split(base + len - PAGE, PAGE);
+    // SAFETY: acts only on placeholders (it fails where a view is mapped).
+    unsafe { VirtualFree(base as *mut c_void, len, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS) };
+    // Whichever of them were views' own are one placeholder now.
+    for at in (base..base + len).step_by(PAGE) {
+        physical.holes.remove(&at);
+    }
+    if show(base, len, &slice, false, false) {
+        note_view(physical, base, len, slice);
+        return true;
+    }
+    for k in (0..len).step_by(PAGE) {
+        let page = Slice { index: slice.index + k / PAGE, section: slice.section.clone() };
+        if !show(base + k, PAGE, &page, false, true) {
+            unmap(physical, base, k);
+            return false;
+        }
+        note_view(physical, base + k, PAGE, page);
+    }
+    true
+}
+
+/// What follows a view's mapping ([`map`]): it is noted, and told.
+fn note_view(physical: &mut Physical, base: usize, len: usize, slice: Slice) {
     // Noted before the GPU side is told: bytes DirectStorage put in earlier,
     // without notice at these addresses ([`pages_written`]), are there by
     // the time the copies of them go.
@@ -1936,7 +1982,6 @@ fn map(physical: &mut Physical, base: usize, len: usize, slice: Slice) -> bool {
     // What the range shows now, for the GPU side's in-place census.
     leonida_gpu::title_memory_view(base, len, slice.section.handle as usize, (slice.index * PAGE) as u64);
     physical.views.insert(base, (len, slice));
-    true
 }
 
 /// Cuts `[base, base + len)` out of the placeholder it is in (which fails
@@ -1953,8 +1998,9 @@ fn split(base: usize, len: usize) {
 }
 
 /// The system calls of [`map`]; `own`: the placeholder at `base` is `len`
-/// long already.
-fn show(base: usize, len: usize, slice: &Slice, own: bool) -> bool {
+/// long already; `loud`: a refusal is said (not where the caller tries
+/// another way).
+fn show(base: usize, len: usize, slice: &Slice, own: bool, loud: bool) -> bool {
     let map_view = || {
         // SAFETY: maps the section over a placeholder; acts only on one.
         counted(Call::Map, || unsafe {
@@ -1977,12 +2023,14 @@ fn show(base: usize, len: usize, slice: &Slice, own: bool) -> bool {
         view = map_view();
     }
     if view.Value as usize != base {
-        tracing::warn!(
-            address = format_args!("{base:#x}"),
-            len,
-            error = %std::io::Error::last_os_error(),
-            "mapping physical pages failed (not a placeholder?)"
-        );
+        if loud {
+            tracing::warn!(
+                address = format_args!("{base:#x}"),
+                len,
+                error = %std::io::Error::last_os_error(),
+                "mapping physical pages failed (not a placeholder?)"
+            );
+        }
         return false;
     }
     if !slice.section.commit_shown(slice.index, base, len) {
@@ -2825,6 +2873,29 @@ mod tests {
     fn page_bytes(page: usize) -> Vec<u8> {
         let slice = page_table().pages.get(&page).cloned().expect("known page");
         View::map(&slice, 1).expect("mapped").bytes().to_vec()
+    }
+
+    /// Four pages mapped one by one, then at one stretch: one view in place
+    /// of the four placeholders their views left (joined first).
+    #[test]
+    fn consecutive_pages_replace_separate_placeholders() {
+        let pages = allocate(4);
+        let base = XMemVirtualAlloc(std::ptr::null_mut(), 4 * PAGE, MEM_RESERVE | PAGES_64K, 0, PAGE_READWRITE);
+        assert!(!base.is_null());
+        let at = |page: usize| base.wrapping_byte_add(page * PAGE);
+        for (index, page) in pages.iter().enumerate() {
+            assert_eq!(XMemMapPhysicalPages(at(index), 1, page), at(index));
+            // SAFETY: a live, writable view of this page.
+            unsafe { at(index).cast::<u8>().write(index as u8 + 1) };
+        }
+        assert_eq!(XMemMapPhysicalPages(base, 4, pages.as_ptr()), base, "one view over four placeholders");
+        assert_eq!(physical().views.get(&(base as usize)).map(|v| v.0), Some(4 * PAGE), "one view");
+        for index in 0..4 {
+            // SAFETY: the run was mapped above.
+            assert_eq!(unsafe { at(index).cast::<u8>().read() }, index as u8 + 1);
+        }
+        assert_eq!(XMemMapPhysicalPages(base, 4, std::ptr::null()), base);
+        assert_eq!(XMemFreePhysicalPages(4, pages.as_ptr()), 1);
     }
 
     #[test]
