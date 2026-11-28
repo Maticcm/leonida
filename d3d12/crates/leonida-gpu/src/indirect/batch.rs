@@ -66,6 +66,9 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     uint asked = 0;
     uint kind = 0;
     uint words = 0;
+    // As `super::SOURCE` notes them: a dispatch record that asks for more groups in x than run.
+    uint wide = 0;
+    uint wide_cut = 0;
     if (gi == 0) {
         largest_asked = 0;
         all_asked = 0;
@@ -92,6 +95,10 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
                 g = uint3(0, 0, 0);
             }
             cost = g.x * g.y * g.z * 64u;
+            if (record[0] > g.x && record[0] <= (1u << 24)) {
+                wide = record[0];
+                wide_cut = record[0] - g.x;
+            }
             record[0] = g.x;
             record[1] = g.y;
             record[2] = g.z;
@@ -175,6 +182,11 @@ void main(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex) {
     }
     if (!active) {
         return;
+    }
+    if (wide > 0) {
+        uint was;
+        budget.InterlockedMax(20, wide, was);
+        budget.InterlockedAdd(24, wide_cut, was);
     }
     if (fits[gi] == 0) {
         record[0] = 0;

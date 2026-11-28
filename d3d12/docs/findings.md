@@ -58,7 +58,21 @@ in that order of size:
 - **A rare lost write** (6 of 200 runs of a stress test): a view was mapped between our
   look at its guards and our lock, and views were opened one after another. None in 603
   runs after.
-- **Blocky patches**: indirect dispatches cut at 65,535 groups.
+- **Blocky patches**: indirect dispatches cut at 65,535 groups. An AMD card was given what the
+  title asked from the start; every other card stayed cut until 2026-11-27. On an RTX 4060 Ti
+  at the save (Series X, 1440p) the first tile list (`CS_FinalGather_0_1_1_0`) asked for 85,856
+  to 86,544 groups of 8 x 4 pixels: its last 20,300 (2,540 tiles of 16 x 16, the lower left of
+  the picture behind a stair-stepped edge) got no final gather in any frame, so the railing and
+  the character's legs there looked see-through under a displaced copy of other railing. The
+  card runs such dispatches whole (65,536 to 2^20 groups, each once under its own number), so
+  a card is now asked once a run, with one dispatch of 2^20 groups of a program of ours
+  (`indirect::runs_wide`; 75 ms with its compile), and given up to 2^20 groups where it runs
+  them; `LEONIDA_INDIRECT_WIDE=0` cuts as before. What is still cut is said in the log
+  ("indirect dispatches: the most groups in x one asked for ..."). On the card the list's
+  dispatch went from 0.75 to 1.2 ms a frame (`LEONIDA_GPU_TIMING=1`). A form for a card that
+  does not run them (the groups folded into rows, the program told its grid) is not written:
+  a command signature that sets root constants from the record costs this card 1.4 us a
+  command against 0.08, and some 1,800 indirect dispatches a frame would need it.
 - **Square holes and dashed edges in shadows**: pixel shaders that read their quad's
   neighbours with wave reads; on AMD helper lanes take no part in them.
 - **Cube reflections too blurred, wrong materials**: DXIL's `Log` is base 2, and
