@@ -114,7 +114,17 @@ $settings = @{
     # Leonida: indirect batches end at every dispatch (INDIRECT_BATCH=1, not 2). With 2 a batch opened before the
     # title's culling and tessellation dispatches clamped their arguments before they were written: the sea's surface
     # and its tiled resolve went missing for a frame (sand or black blocks), 6 times in 271 frames; with 1, none in 441.
-    LEONIDA_INDIRECT_BATCH = '1'; LEONIDA_MAP_THREADS = '1'; LEONIDA_TITLE_PRIORITIES = '0'; LEONIDA_CARD_AWAKE = '1'
+    LEONIDA_INDIRECT_BATCH = '1'; LEONIDA_MAP_THREADS = '1'; LEONIDA_TITLE_PRIORITIES = '0'
+    # Leonida: the card is not kept awake between submissions (it was '1': a small compute loop that keeps the
+    # card's clocks up while it stands idle between submissions, host\awake.rs). Switched in turns of 4 s (LEONIDA_AB)
+    # from one save, Series X, RTX 4060 Ti, Ryzen 5 7600X (2026-11-28), the frame with the loop against without:
+    # standing at 1440 lines +2.1 ms (+-0.3, of 72), standing at 1080 lines +0.4 to +0.6 (+-0.3, of 66), walking and
+    # turning at 1440 lines +0.7 (+-1.2) and +1.8 (+-1.8, of 83 to 87). The card is 86 to 99 % busy in all of them:
+    # there is no idle card to keep awake, and the loop takes its share of a busy one. What is given up: where the
+    # card does stand idle for half of a frame (a faster card behind the same processor) the driver lowers its
+    # clocks and the next submission starts slow (a captured frame of 30 ms took 38 to 40 with waits between its
+    # submissions). '1' in -More: kept awake, as before.
+    LEONIDA_CARD_AWAKE = '0'
     # Leonida: the copy behind an aliased view (an R9G9B9E5 view the title places in an R32_UINT texture shaders
     # write: 86 copies, 390 MiB a frame) goes from texture to texture, not through a buffer: the same texels, moved
     # once. Standing at one save, Series X, 1440p, RTX 4060 Ti (2026-11-28): the copies 3.6 -> 1.9 ms of a timing
