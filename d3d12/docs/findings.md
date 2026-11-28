@@ -644,6 +644,8 @@ found; the frame replay (`replay/`) is where to ask.
 |---|---|---|
 | `LEONIDA_REMAP_SPANS` (a texture refresh waits only for a change of mapping that touches its own memory) | A/B of 15 s phases while walking and turning, 25 phases | mean 153.3 -> 129.5 ms, median 117.2 -> 103.1, p90 305.1 -> 230.5. Of 130 to 320 named reads a frame, 6 to 128 went on beside a change and none waited. Standing: no change (the lock is held 5 to 13 ms a frame there). On by default. |
 | `LEONIDA_BATCH_SCRATCH_POOL` (lists share the scratch buffers of their batched clamps) | one standing run each way, 4.5 minutes in the world | the card's memory in use that no line counted 3,587 MB and rising -> 1,347 MB and level; "card buffers" made 7,165 -> 5,592 MB; host textures made again after being let go 1,700 -> 357; 150 buffers a frame taken from 170 to 200 kept, none made. In the 13-minute session before it the uncounted memory reached 5.0 GB and the card stayed at its budget of 14.3 GB. On by default. |
+| `LEONIDA_SECTION_MB` (the title's physical pages in sections of a few MiB instead of one section an allocation) | one run each of 4 minutes walking and turning, every run from the same copy of the autosave | none: mean 111.6 ms, median 105.1, p90 139.3, title memory held for mapping changes 43.2 ms a frame, the mapping thread 46.2. 2 MiB: 91.7, 91.8, 111.4, held 10.6, thread 22.6. 16 MiB: 94.4, 91.7, 113.9, held 8.9, thread 20.7. The card is then busy 90 % of the time (78 % without). The launcher sets 16. |
+| `LEONIDA_WINDOWS_BAR_MB` (windows of title memory in card memory the CPU maps) | one standing run each from the same save, with timelines of 20 frames | 0 (all 1,105 windows in the PC's memory): 93.4 ms median, the card running 68 to 73 ms a frame. 3072, the launcher's (759 windows on the card, 797 not): 94.1 ms, 59 to 74 ms. No difference: what the card reads of windows over the bus is not where its time goes. 6144 is not comparable (its view had 4,800 draws). |
 | `LEONIDA_THIN_THREADS=6` with `LEONIDA_UNDER_THREADS=4` | one standing run | not comparable: the title streamed through the measurement (192 ms a frame of mapping changes held, frames of 160 to 580 ms). To be run again as an A/B. |
 
 While the title streams (the idle camera is enough: 850 to 1,600 pages of 64 KiB mapped a second) the mapping
@@ -651,6 +653,15 @@ thread holds title memory for 90 to 270 ms of a frame in single holds of 45 to 7
 to 3 ms, nearly all of it in the kernel's unmapping (`ZwUnmapViewOfSectionEx` is 47 % of that thread's running
 samples, `NtMapViewOfSectionEx` 10 %). Whether the title would stream that much on the console at rest is not
 known; its texture read-backs (18 a frame) are where its streaming decisions come from.
+
+Over one standing run the frame follows the draw count closely: 77.7 ms at 8,000 draws, 100.5 ms at 14,000, and
+70 ms at 4,800 in another run from the same save, which is about 47 ms a frame whatever is drawn and 3.8 µs a
+draw. The 47 ms are more than a 30 fps frame has, so the passes that do not grow with the draw count (1,574
+direct dispatches, the compute passes of 1 to 4 ms, the copies behind aliased textures) are where to look first.
+
+Runs are only comparable when they start from the same save: the title rewrites its autosave every two minutes,
+so a start loads wherever the last one ended (a road junction at midday, a house at night). The test scripts put a
+kept copy of the autosave container in place before each start and the player's own back afterwards.
 
 The sampling profiler (`LEONIDA_PROFILE`) must not be given the title's own threads
 (`LEONIDA_PROFILE_ONLY=leonida-image`): walking one of their stacks faulted in `ntdll` 23 s into the window and
