@@ -170,6 +170,13 @@ $settings = @{
     # 285,000 regions asked of Windows one by one took a thread 1.06 s every 30 s (2026-11-27), beside the title's
     # own mapping calls. -More @{LEONIDA_MEMORY_MAP='1'} has the line again.
     LEONIDA_MEMORY_MAP = '0'
+    # Leonida: the title's physical pages come in sections of 16 MiB, not one section for each allocation of
+    # gigabytes: unmapping and mapping a page of a small section is far cheaper for Windows (after Trex/Dolores
+    # e5e7120 and El1xr's section_mb.rs, GPL-3.0, which measured the unmap at 99-182 -> 3-11 us). Walking and turning
+    # from one save, 4 minutes each (2026-11-28, RTX 4060 Ti): mean 111.6 -> 94.4 ms a frame, median 105.1 -> 91.7,
+    # p90 139.3 -> 113.9; title memory held for mapping changes 43.2 -> 8.9 ms a frame, the mapping thread 46.2 ->
+    # 20.7. Sections of 2 MiB measured the same (91.7, 91.8, 111.4). '0' in -More: one section, as before.
+    LEONIDA_SECTION_MB = '16'
 }
 $console = if ($SeriesX) { 'series-x' } else { 'series-s' }
 # The render scale of each DLSS mode (rendered lines over output lines; the layer picks DLSS's own mode by it).
