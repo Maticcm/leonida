@@ -643,6 +643,83 @@ fn page_table_mut() -> RwLockWriteGuard<'static, Pages> {
     PAGES.write().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The most pages of one section: `LEONIDA_SECTION_MB=<MiB>` makes an
+/// allocation of sections of that many MiB at most (unset, 0 or not a
+/// number: all its pages in one section, as before).
+///
+/// The title asks for its 6.1 GiB of pages in one call and maps them a
+/// 64 KiB page at a time: one section with views by the hundred thousand.
+/// As the projects that found it tell it, the host keeps with each section
+/// the list of its views, and what moves a section's 4 KiB pages (the
+/// worker that gathers large pages, trimming) walks that list for each
+/// page, holding the section's lock, which every map and unmap of the
+/// title's needs to add or take away a view. Their numbers, not ours:
+/// vilocity, moving through the world, maps of 114 us and unmaps of 182 us
+/// each, 848 ms of mapping calls a second, and in sections of 2 MiB 11 and
+/// 3 us, 117 ms (as El1xr's notes give them); CGBJ, a kernel trace, 380 ms
+/// of every second, per call map 53 -> 3 us and unmap 99 -> 11 us in
+/// sections of 16 MiB (as OP-lite's notes give them). Here a page mapped
+/// while the title streams costs 0.4 to 3 ms; whether this is why has not
+/// been measured, so the switch is off until a run says.
+///
+/// What goes by sections sees more of them, and nothing else changes: the
+/// bytes and every address are as before. A run of pages for a mapping or
+/// a write ends at a section's end as it did at an allocation's
+/// ([`runs`]), so a mapping of the title's over a bound is a view a
+/// section, and a DirectStorage destination over one gets no window in
+/// place ([`page_window`]) and is written run by run ([`write_physical`]).
+/// Each section has its own whole views ([`Section::window`], and the GPU
+/// side's `inplace::beside`, which looks its sections through one by
+/// one), and a range over a bound is in none.
+///
+/// Not with renderer port 1 (`LEONIDA_PORT_CONSTANTS=1`), whose 32-bit
+/// heap must be one stretch of one section ([`arrange`]), nor under Wine,
+/// where a section is a sparse file with no such list.
+///
+/// Ported from Op-lite/OP-lite e5e7120 (`VICTORY_SECTION_PAGES`, there
+/// after CGBJ's main), as Trex/Dolores' op-lite branch carries it; the
+/// switch's name and unit are those of `VICTORY_SECTION_MB`
+/// (trustno1-coder/VIctory-NVIDIA PR #44, a port of vilocity 0f44a1706),
+/// read in kylepelham/El1xr.
+fn section_pages() -> usize {
+    #[cfg(test)]
+    if let Some(pages) = TEST_SECTION_PAGES.get() {
+        return pages;
+    }
+    static PAGES: LazyLock<usize> = LazyLock::new(|| {
+        let pages = pages_per_section(std::env::var("LEONIDA_SECTION_MB").ok().as_deref());
+        if pages == usize::MAX || on_wine() {
+            return usize::MAX;
+        }
+        if port_on() {
+            tracing::warn!(
+                "LEONIDA_SECTION_MB is left out with LEONIDA_PORT_CONSTANTS=1: renderer port 1 needs its 32-bit heap in one section"
+            );
+            return usize::MAX;
+        }
+        tracing::info!(
+            mb = pages * PAGE / MIB,
+            "physical pages: an allocation is made of sections of at most this many MiB (LEONIDA_SECTION_MB)"
+        );
+        pages
+    });
+    *PAGES
+}
+
+/// [`section_pages`] for a value of `LEONIDA_SECTION_MB`: whole MiB.
+fn pages_per_section(mb: Option<&str>) -> usize {
+    match mb.and_then(|mb| mb.trim().parse::<usize>().ok()).map_or(0, |mb| mb.saturating_mul(MIB / PAGE)) {
+        0 => usize::MAX,
+        pages => pages,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's [`section_pages`], for its thread only.
+    static TEST_SECTION_PAGES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// `count` is in and out (pages wanted, pages given); all or nothing here.
 pub extern "system" fn XMemAllocatePhysicalPages(
     flags: u64,
@@ -654,55 +731,66 @@ pub extern "system" fn XMemAllocatePhysicalPages(
     }
     // SAFETY: checked non-null.
     let n = unsafe { *count };
-    let Some(size) = n.checked_mul(PAGE).filter(|&s| s > 0) else {
+    if n.checked_mul(PAGE).is_none_or(|size| size == 0) {
         return 0;
-    };
-    // A pagefile-backed section of `size` bytes, its pages committed when
-    // first mapped or written (`commit`): the title asks for 6.1
-    // GiB at once, which a busy host often cannot commit (error 1450).
-    // SAFETY: plain section creation.
-    let handle = unsafe {
-        CreateFileMappingW(
-            INVALID_HANDLE_VALUE,
-            std::ptr::null(),
-            // Under Wine a committed section is a sparse file, free until
-            // touched, and committing a reserved one page by page costs a
-            // wineserver request each that scans every range committed so
-            // far: commit it whole there.
-            PAGE_READWRITE | if on_wine() { SEC_COMMIT } else { SEC_RESERVE },
-            (size as u64 >> 32) as u32,
-            size as u32,
-            std::ptr::null(),
-        )
-    };
-    if handle.is_null() {
-        let error = std::io::Error::last_os_error();
-        tracing::warn!(n, %error, "XMemAllocatePhysicalPages failed");
-        // SAFETY: checked non-null.
-        unsafe { count.write(0) };
-        return 0;
+    }
+    // Pagefile-backed sections of `n` pages in all ([`section_pages`] each
+    // at most), their pages committed when first mapped or written
+    // (`commit`): the title asks for 6.1 GiB at once, which a busy host
+    // often cannot commit (error 1450).
+    let per = section_pages().clamp(1, n);
+    let mut sections: Vec<Arc<Section>> = Vec::with_capacity(n.div_ceil(per));
+    for first in (0..n).step_by(per) {
+        let here = per.min(n - first);
+        let size = here * PAGE;
+        // SAFETY: plain section creation.
+        let handle = unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                // Under Wine a committed section is a sparse file, free until
+                // touched, and committing a reserved one page by page costs a
+                // wineserver request each that scans every range committed so
+                // far: commit it whole there.
+                PAGE_READWRITE | if on_wine() { SEC_COMMIT } else { SEC_RESERVE },
+                (size as u64 >> 32) as u32,
+                size as u32,
+                std::ptr::null(),
+            )
+        };
+        if handle.is_null() {
+            // (Read before the sections made so far close, with `sections`.)
+            let error = std::io::Error::last_os_error();
+            tracing::warn!(n, %error, "XMemAllocatePhysicalPages failed");
+            // SAFETY: checked non-null.
+            unsafe { count.write(0) };
+            return 0;
+        }
+        sections.push(Arc::new(Section {
+            handle,
+            pages: here,
+            window: std::sync::OnceLock::new(),
+            committed: (0..here.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
+        }));
     }
     tracing::debug!(
         n,
+        sections = sections.len(),
         flags = format_args!("{flags:#x}"),
         "XMemAllocatePhysicalPages"
     );
     // For the GPU side's in-place census: only a committed section can be
     // opened as a host heap.
-    leonida_gpu::title_memory_section(handle as usize, size as u64, on_wine());
-    let section = Arc::new(Section {
-        handle,
-        pages: n,
-        window: std::sync::OnceLock::new(),
-        committed: (0..n.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
-    });
+    for section in &sections {
+        leonida_gpu::title_memory_section(section.handle as usize, (section.pages * PAGE) as u64, on_wine());
+    }
     let mut table = page_table_mut();
     let first = table.next_page;
     table.next_page += n * FRAMES;
     for index in 0..n {
         let slice = Slice {
-            section: section.clone(),
-            index,
+            section: sections[index / per].clone(),
+            index: index % per,
         };
         table.pages.insert(first + index * FRAMES, slice);
     }
@@ -2896,6 +2984,68 @@ mod tests {
         }
         assert_eq!(XMemMapPhysicalPages(base, 4, std::ptr::null()), base);
         assert_eq!(XMemFreePhysicalPages(4, pages.as_ptr()), 1);
+    }
+
+    #[test]
+    fn section_sizes_come_from_the_switch() {
+        assert_eq!(pages_per_section(None), usize::MAX);
+        assert_eq!(pages_per_section(Some("0")), usize::MAX);
+        assert_eq!(pages_per_section(Some("off")), usize::MAX);
+        assert_eq!(pages_per_section(Some("2")), 32);
+        assert_eq!(pages_per_section(Some(" 16 ")), 256);
+    }
+
+    /// (`LEONIDA_SECTION_MB`) An allocation of more pages than a section
+    /// holds is several sections: mapped at one stretch it is a view a
+    /// section, and the bytes are in the pages their numbers say, whichever
+    /// side of a cut; a DirectStorage write over the cut shows through the
+    /// views, with no window in place over it; the page behind the cut
+    /// shows at a second address too; and a run inside one section maps
+    /// over the two placeholders the cut's views left.
+    #[test]
+    fn a_large_allocation_is_several_sections() {
+        let was = TEST_SECTION_PAGES.replace(Some(16));
+        let per = section_pages();
+        let n = per + 3;
+        let pages = allocate(n);
+        let lengths: Vec<usize> = runs(&pages, 0, n * PAGE).expect("known pages").iter().map(|&(_, n)| n).collect();
+        assert_eq!(lengths, vec![per, 3]);
+        let base = XMemVirtualAlloc(std::ptr::null_mut(), 4 * PAGE, MEM_RESERVE | PAGES_64K, 0, PAGE_READWRITE);
+        assert!(!base.is_null());
+        let at = |page: usize| base.wrapping_byte_add(page * PAGE).cast::<u8>();
+        let cut = &pages[per - 2..per + 2];
+        assert_eq!(XMemMapPhysicalPages(base, 4, cut.as_ptr()), base);
+        let views = |n: usize| -> Vec<usize> {
+            let physical = physical();
+            physical.views.range(base as usize..base as usize + n * PAGE).map(|(_, v)| v.0 / PAGE).collect()
+        };
+        assert_eq!(views(4), vec![2, 2], "a view a section");
+        for page in 0..4 {
+            // SAFETY: mapped read-write.
+            unsafe {
+                at(page).write(10 + page as u8);
+                at(page).add(PAGE - 1).write(20 + page as u8);
+            }
+            let bytes = page_bytes(cut[page]);
+            assert_eq!((bytes[0], bytes[PAGE - 1]), (10 + page as u8, 20 + page as u8), "page {page}");
+        }
+        assert!(write_physical(&cut[1..], PAGE - 2, &[1, 2, 3, 4]));
+        // SAFETY: mapped.
+        let seen = unsafe { [at(1).add(PAGE - 2).read(), at(1).add(PAGE - 1).read(), at(2).read(), at(2).add(1).read()] };
+        assert_eq!(seen, [1, 2, 3, 4]);
+        assert!(page_window(&cut[1..3], 0, 2 * PAGE).is_none(), "no window in place over a cut");
+        assert!(page_window(&cut[..2], 0, 2 * PAGE).is_some());
+        let other = XMemVirtualAlloc(std::ptr::null_mut(), PAGE, MEM_RESERVE | PAGES_64K, 0, PAGE_READWRITE);
+        assert!(map_alias(other as u64, at(2) as u64, PAGE as u64));
+        // SAFETY: mapped.
+        assert_eq!(unsafe { other.cast::<u8>().read() }, 3);
+        assert!(map_alias(other as u64, 0, PAGE as u64));
+        // Four pages of the first section where the cut's two views were.
+        assert_eq!(XMemMapPhysicalPages(base, 4, pages.as_ptr()), base);
+        assert_eq!(views(4), vec![4], "one view over the two placeholders");
+        assert_eq!(XMemMapPhysicalPages(base, 4, std::ptr::null()), base);
+        assert_eq!(XMemFreePhysicalPages(n, pages.as_ptr()), 1);
+        TEST_SECTION_PAGES.set(was);
     }
 
     #[test]
