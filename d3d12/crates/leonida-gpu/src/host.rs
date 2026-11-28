@@ -10648,6 +10648,47 @@ struct Presenter {
     trainer: trainer::Overlay,
     /// What the Lua mods draw (`leonida-lua`): the same overlay, with a place of its own.
     lua: trainer::Overlay,
+    /// The swap chain was made to show a frame as soon as it is presented ([`tearing`]): its
+    /// flags, kept for `ResizeBuffers`, which may not change them.
+    tearing: bool,
+    /// Presents ask for that; off for the rest of the run once such a present is refused.
+    presents_tearing: bool,
+}
+
+/// Whether the swap chain shows a frame as soon as it is presented, not at the screen's next
+/// refresh (`DXGI_FEATURE_PRESENT_ALLOW_TEARING`): `LEONIDA_TEARING=1`, where the system has
+/// it; off by default (unset or `0`: presents wait for the refresh, as before). On a G-SYNC or
+/// FreeSync screen nothing tears; on another a frame may.
+///
+/// From trustno1-coder/VIctory-NVIDIA 8fc2254 (trustno1-coder; `VICTORY_TEARING`, on there),
+/// GPL-3.0. Its account: a window in front, which Windows shows without its compositor
+/// ("independent flip"), had each frame wait for a refresh with two buffers, frame times
+/// rounded up to whole refreshes, about 2 frames a second fewer than the same window behind
+/// another; and on an RTX 5070 at 1440p presents of this kind were not shown (a white window),
+/// which is why a refused one ends them for the run. Off here until it has run in the game:
+/// not measured on this tree, nor tried with Streamline's swap chain (`crate::fg`).
+fn tearing(factory: &IDXGIFactory2) -> bool {
+    if !crate::switch::on("LEONIDA_TEARING") {
+        return false;
+    }
+    let Ok(factory) = factory.cast::<IDXGIFactory5>() else {
+        return false;
+    };
+    let mut allowed = windows::core::BOOL(0);
+    // SAFETY: a BOOL-sized answer for this feature.
+    let asked = unsafe {
+        factory.CheckFeatureSupport(
+            DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+            (&raw mut allowed).cast(),
+            std::mem::size_of_val(&allowed) as u32,
+        )
+    };
+    asked.is_ok() && allowed.as_bool()
+}
+
+/// The swap chain's flags for [`tearing`].
+fn chain_flags(tearing: bool) -> DXGI_SWAP_CHAIN_FLAG {
+    if tearing { DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING } else { DXGI_SWAP_CHAIN_FLAG(0) }
 }
 
 /// The frame rate the meter last counted, in tenths of a frame a second (0: none yet): for the
@@ -11086,7 +11127,7 @@ impl Host {
             // SAFETY: no back buffer is held; every submission was waited for.
             let resized = unsafe {
                 p.swap_chain
-                    .ResizeBuffers(BUFFERS, placed.width, placed.height, format, DXGI_SWAP_CHAIN_FLAG(0))
+                    .ResizeBuffers(BUFFERS, placed.width, placed.height, format, chain_flags(p.tearing))
             };
             match resized {
                 Ok(()) => {
@@ -11374,7 +11415,17 @@ impl Host {
             // Leonida: with bars, frame generation is told where in the buffer the picture is.
             crate::fg::picture_box((!whole).then_some([placed.left, placed.top, width, height]));
             crate::fg::present_start();
-            let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            if p.presents_tearing {
+                // ([`tearing`]: shown at once; a refused one ends that for the run.)
+                let shown = p.swap_chain.Present(0, DXGI_PRESENT_ALLOW_TEARING);
+                if shown.is_err() {
+                    tracing::warn!(code = %shown, frame, "a present shown at once was refused; presenting at the next refresh for the rest of the run");
+                    p.presents_tearing = false;
+                    let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+                }
+            } else {
+                let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            }
             crate::fg::present_end();
             showing.next("the frame meter");
             #[cfg(feature = "diagnostics")]
@@ -11410,6 +11461,10 @@ impl Host {
         // SAFETY: plain object creation for our window.
         unsafe {
             let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+            let tearing = tearing(&factory);
+            if tearing {
+                tracing::info!("swap chain: frames shown as soon as presented (LEONIDA_TEARING=1)");
+            }
             // LOCAL (11/26): with `LEONIDA_FRAME_GEN`, Streamline's proxy factory (crate::fg).
             let factory = crate::fg::start(&self.device, factory);
             let desc = DXGI_SWAP_CHAIN_DESC1 {
@@ -11423,6 +11478,7 @@ impl Host {
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: BUFFERS,
                 SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+                Flags: chain_flags(tearing).0 as u32,
                 ..Default::default()
             };
             let swap_chain = factory
@@ -11447,6 +11503,8 @@ impl Host {
                 menu: menu::Menu::new(),
                 trainer: trainer::Overlay::new(height),
                 lua: trainer::Overlay::idle(),
+                tearing,
+                presents_tearing: tearing,
             })
         }
     }
