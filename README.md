@@ -57,6 +57,21 @@ the loading screen of the story load ([the route](docs/first_run_ui.md#through-t
 [First-run UI on Windows](docs/first_run_ui.md) has the build and launch steps;
 [the Linux/Proton report](docs/linux_proton.md) has the timings and where it stops.
 
+**The second runtime, [`d3d12/`](d3d12/README.md) (Direct3D 12, Windows, NVIDIA and AMD), does reach the world.**
+It is a separate program (`leonida.exe`) that grew from VIctory; what follows are this project's own measurements,
+taken by the maintainer on 2026-11-27 with the branch state of that day (commit `37426fd9f`), not figures quoted
+from another project:
+
+- PC: Ryzen 5 7600X (6 cores), GeForce RTX 4060 Ti 16 GB (driver 616.64), 32 GB of RAM, Windows 11.
+- Series X profile, 2560x1440 picture, the title's own upscaler at render scale 1, no generated frames.
+- A save loads into the open world and the character can be walked with a pad or with keyboard and mouse, with
+  sound. **12 to 13 frames a second** standing at the save point (median frame 75 to 82 ms in three runs of about
+  three minutes, about 7,100 draws a frame); the game uses about 5.6 of the 6 cores and the card is about 95% busy.
+- Known to be wrong in the picture: a stair-stepped part of the screen near the camera gets no indirect light at
+  that save point; ray-traced light is stood in for (every ray is a miss, the structure builder is off); the
+  transmission-volumetrics programs are left out, which darkens water.
+- Not measured: how far the story plays, and how long a session lasts.
+
 | What | Status |
 |---|---|
 | Booting the game | ⚠️ Through the story load into the world phase, on native Windows and Linux/Proton; no world frame verified yet ([report](docs/linux_proton.md)) |
@@ -100,7 +115,7 @@ The port isn't downloaded ready-made. It's built on your PC from your own copy.
 **The easy way:**
 
 1. Install the prerequisites below.
-2. Download this project **with its submodule**: `git clone --recursive https://github.com/ubiquitarianism/leonida`. A
+2. Download this project **with its submodule**: `git clone --recursive https://github.com/ProjectLeonida/mandy`. A
    "Download ZIP" from GitHub leaves out `third_party/rpf9-explorer`. The build fetches it if `git` is installed,
    and otherwise tells you what to do.
 3. Double-click **`Build.bat`**. On Linux or macOS, run **`./Build.sh`** from a terminal instead (see
