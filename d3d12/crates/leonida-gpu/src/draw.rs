@@ -725,6 +725,26 @@ pub(crate) fn waits_line(frames: f64) {
     }
 }
 
+/// Since the last frame-rate line: the title's direct dispatches recorded, by the groups each
+/// runs (none, 1, up to 16, up to 256, up to 4,096, more), and those of them whose program can
+/// store to buffers.
+#[cfg(feature = "diagnostics")]
+static DISPATCH_SIZES: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+/// For the frame-rate line: the title's direct dispatches by size ([`DISPATCH_SIZES`]).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn dispatch_sizes_line(frames: f64) {
+    let n: [f64; 7] = std::array::from_fn(|i| DISPATCH_SIZES[i].swap(0, Ordering::Relaxed) as f64 / frames);
+    let all: f64 = n[..6].iter().sum();
+    if all > 0.0 {
+        tracing::info!(
+            "the title's direct dispatches per frame: {all:.0}; by groups run: {:.0} of none, {:.0} of 1, {:.0} of 2 to 16, {:.0} of 17 to 256, \
+             {:.0} of 257 to 4,096, {:.0} of more; {:.0} with a program that can store to buffers",
+            n[0], n[1], n[2], n[3], n[4], n[5], n[6]
+        );
+    }
+}
+
 /// Whether a title's wait for every shader write is recorded: `waited`, its
 /// list has had one and nothing since that can write through unordered
 /// access; `merge`, [`barrier_merge`].
@@ -3978,6 +3998,22 @@ impl State {
                 unsafe { list.list.SetComputeRoot32BitConstant(param, threads[0], word) };
                 // (One word of a parameter's constants: the cache has them whole.)
                 self.cache.constant_set(true, param);
+            }
+        }
+        #[cfg(feature = "diagnostics")]
+        {
+            let groups = u64::from(x) * u64::from(y) * u64::from(z);
+            let size = match groups {
+                0 => 0,
+                1 => 1,
+                2..=16 => 2,
+                17..=256 => 3,
+                257..=4096 => 4,
+                _ => 5,
+            };
+            DISPATCH_SIZES[size].fetch_add(1, Ordering::Relaxed);
+            if p.stages.iter().any(|stage| stage.translated().stores) {
+                DISPATCH_SIZES[6].fetch_add(1, Ordering::Relaxed);
             }
         }
         // SAFETY: an open list with everything set.

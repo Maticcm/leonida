@@ -1405,7 +1405,12 @@ pub(crate) fn log(frames: f64) {
             text.join(", ")
         );
     }
-    for (what, (n, us, longest)) in by.into_iter().take(40) {
+    // (`LEONIDA_GPU_TIMING_KINDS=<n>`: so many of the heaviest are listed instead of forty.)
+    static LISTED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let listed = *LISTED.get_or_init(|| {
+        std::env::var("LEONIDA_GPU_TIMING_KINDS").ok().and_then(|v| v.trim().parse().ok()).filter(|n| *n > 0).unwrap_or(40)
+    });
+    for (what, (n, us, longest)) in by.into_iter().take(listed) {
         tracing::info!(
             "  the card's time by command (timing run): {:.2} ms a frame in {:.1} commands a frame, the longest {:.2} ms: {what}",
             us as f64 / 1e3 / frames,

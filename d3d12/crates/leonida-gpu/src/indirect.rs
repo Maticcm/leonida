@@ -874,6 +874,7 @@ pub(crate) fn open_batch(
     // A source there is none of is the first again, which no job names.
     let mut ids = [0u64; batch::SOURCES];
     let mut sources = [gpu(source.1)?; batch::SOURCES];
+    let mut read = vec![source.1];
     ids[0] = source.0;
     let others = recent.iter().filter(|r| r.0 != source.0).take(batch::SOURCES - 1);
     for (i, (id, buffer)) in others.enumerate() {
@@ -882,11 +883,29 @@ pub(crate) fn open_batch(
             // copies draws read (`Shadow::refresh`).
             list.keep(buffer);
             (ids[i + 1], sources[i + 1]) = (*id, at);
+            read.push(buffer);
         }
     }
+    // (Timing experiments, each a switch of `LEONIDA_AB`: `batch::Wait`.)
+    #[cfg(feature = "diagnostics")]
+    let wait = if crate::ab::pick("LEONIDA_EXP_BATCH_NO_WAIT") == Some(true) {
+        batch::Wait::None
+    } else if crate::ab::pick("LEONIDA_EXP_BATCH_WAIT_SOURCES") == Some(true) {
+        batch::Wait::For(&read)
+    } else {
+        batch::Wait::All
+    };
+    #[cfg(not(feature = "diagnostics"))]
+    let wait = {
+        let _ = &read;
+        batch::Wait::All
+    };
     #[cfg(feature = "diagnostics")]
     crate::copystat::add(crate::copystat::C::IndirectBounded, 1);
-    batch::record(c, &list.list, (&dst, before), budget, sources, jobs);
+    // (A command of its own for the timing run: its time was the next execution's.)
+    #[cfg(feature = "diagnostics")]
+    list.note_op(|| "clamp batch".to_owned());
+    batch::record(c, &list.list, (&dst, before), budget, sources, jobs, wait);
     // SAFETY: the list's own upload memory of that many bytes, 256-byte
     // aligned, until it is reset.
     Some((unsafe { batch::Table::new(at, base, ids) }, dst))
@@ -3287,7 +3306,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
                         src_ptr.cast::<u32>().add(w).write_volatile(word);
                     }
                     if batched {
-                        batch::record(&pass, &gpu.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu; 4], table_gpu);
+                        batch::record(&pass, &gpu.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu; 4], table_gpu, batch::Wait::All);
                         assert_eq!(batch::Table::new(table_ptr, 0, [1, 0, 0, 0]).place(1, 0, 2), Some(0));
                     } else {
                         let to = (&dst, D3D12_RESOURCE_STATE_COMMON);
@@ -3385,7 +3404,7 @@ void main(uint3 group : SV_GroupID, uint3 thread : SV_DispatchThreadID) {
                         src_ptr.cast::<u32>().add(w).write_volatile(word);
                     }
                     if batched {
-                        batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu; 4], table_gpu);
+                        batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu; 4], table_gpu, batch::Wait::All);
                         assert_eq!(batch::Table::new(table_ptr, 0, [1, 0, 0, 0]).place(1, 0, 2), Some(0));
                     } else {
                         let to = (&dst, D3D12_RESOURCE_STATE_COMMON);
@@ -3523,7 +3542,7 @@ void main(uint3 g : SV_GroupID) {
         // (alive until the list has run)
         let pass = make_from(&warp.device, batch::SOURCE).expect("the batched clamp must compile on WARP");
         let at = if batched {
-            batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu; 4], table_gpu);
+            batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu; 4], table_gpu, batch::Wait::All);
             // SAFETY: the mapped table; the list has not run.
             let mut table = unsafe { batch::Table::new(table_ptr, 0, [1, 0, 0, 0]) };
             table.place_packed(1, 32, 2, pack).expect("a place")
@@ -3686,7 +3705,7 @@ void main(uint3 g : SV_GroupID) {
                 // SAFETY: mapped buffers; nothing runs.
                 unsafe { std::ptr::write_bytes(budget_ptr, 0, 256) };
                 if batched {
-                    batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu, other_gpu, src_gpu, src_gpu], table_gpu);
+                    batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu, other_gpu, src_gpu, src_gpu], table_gpu, batch::Wait::All);
                     // SAFETY: the mapped table; the list has not run.
                     let mut table = unsafe { batch::Table::new(table_ptr, 0, [1, 2, 0, 0]) };
                     assert_eq!(table.place(1 + i as u64 % 2, offset, *kind), Some(0));
@@ -3734,7 +3753,7 @@ void main(uint3 g : SV_GroupID) {
             let (back, back_ptr, _) = warp.shared_buffer(1024);
             let (_table, table_ptr, table_gpu) = warp.shared_buffer(batch::TABLE);
             let dst = warp.default_uav(64 << 10);
-            batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu; 4], table_gpu);
+            batch::record(&pass, &warp.list, (&dst, D3D12_RESOURCE_STATE_COMMON), budget_gpu, [src_gpu; 4], table_gpu, batch::Wait::All);
             // SAFETY: mapped buffers, which the list has not read yet.
             let mut table = unsafe {
                 std::ptr::write_bytes(budget_ptr, 0, 256);
@@ -3867,7 +3886,7 @@ void main(uint3 g : SV_GroupID) {
                         assert!(record_clamp_as(&gpu.clamp, &gpu.list, (&dst, state), budget_gpu, (&src, u64::from(i % 2048) * 32), None, (2, 12, 1), false));
                     } else if i % run == 0 {
                         let k = u64::from(i / run) * batch::TABLE;
-                        batch::record(&pass, &gpu.list, (&dst, state), budget_gpu, [src_gpu; 4], tables_gpu + k);
+                        batch::record(&pass, &gpu.list, (&dst, state), budget_gpu, [src_gpu; 4], tables_gpu + k, batch::Wait::All);
                         // SAFETY: the mapped table; the list has not run.
                         table = unsafe { batch::Table::new(tables_ptr.add(k as usize), 0, [1, 0, 0, 0]) };
                     }
