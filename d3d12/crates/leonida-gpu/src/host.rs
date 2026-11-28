@@ -2219,6 +2219,125 @@ fn read_backs_line(frames: f64) {
     );
 }
 
+/// Whether the scratch buffers of the batched clamps
+/// ([`HostList::batch_place`]) are shared by the lists
+/// (`LEONIDA_BATCH_SCRATCH_POOL=0`: a list keeps every one it ever took for
+/// as long as it lives, as before; `LEONIDA_AB` can name it).
+///
+/// Such a buffer is 64 KiB of the card's own memory and holds the clamped
+/// records of eight batches. A list took one more whenever a recording had
+/// more batches than its buffers held, and kept them all from recording to
+/// recording; host lists are reset and handed to the next recording that
+/// asks (`crate::list::recycle`), so in time every list held as many as the
+/// heaviest recording it ever served, and nothing counted them.
+///
+/// In the play session of 2026-11-27 (RTX 4060 Ti, some 1,100 indirect
+/// commands bounded a frame, 1,589 host lists alive) 50,000 card buffers of
+/// 60 KiB on average, 3.0 GB, were made after the world had loaded, fewer
+/// with every minute in one place and many again in the next, as marks of
+/// the most ever needed rise; the card's memory in use rose by as much in
+/// each 42 seconds, beside everything the memory lines count, until the card
+/// was full and textures were let go and made again for want of room. No
+/// line said which buffers those were (`crate::census` now does, by the line
+/// of the source that made them): that they were these is what their size,
+/// their number and the way they came say, not something counted.
+///
+/// With the switch a list gives its buffers to a table when it is reset
+/// ([`give_batches`]) and a recording takes one from there before one is
+/// made, as lists share their scratch chunks ([`scratch_pool`]): as many are
+/// alive as the lists recorded and not yet reset need, plus those kept.
+///
+/// Why a buffer in the table is nobody's, and in the state the next
+/// recording expects: a list is reset only after its last submission has
+/// finished, and every recording leaves the buffers it used in the common
+/// state when it closes ([`HostList::batches_common`]); one that was never
+/// closed or never sent ran no state change at all.
+fn batch_pool() -> bool {
+    crate::toggled!("LEONIDA_BATCH_SCRATCH_POOL")
+}
+
+/// The bytes of a scratch buffer of the batched clamps.
+const BATCH_SCRATCH: u64 = (BATCHES * crate::indirect::batch::JOBS * crate::indirect::batch::SLOT) as u64;
+
+/// The most such buffers kept while no list holds them: 64 MiB of the card's
+/// memory. What a reset gives back past that is let go, as all of a list's
+/// were when the list went.
+const SPARE_BATCHES_MOST: usize = 1024;
+
+/// A scratch buffer of the batched clamps no list holds.
+struct SpareBatch(ID3D12Resource);
+
+// SAFETY: a D3D12 resource (free-threaded) that nothing else names.
+unsafe impl Send for SpareBatch {}
+
+/// Those buffers ([`batch_pool`]).
+static SPARE_BATCHES: Mutex<Vec<SpareBatch>> = Mutex::new(Vec::new());
+
+/// Since the last frame-rate line: scratch buffers of the batched clamps
+/// made, taken from the table, kept there at a list's reset, and let go there
+/// (the table full).
+static BATCH_SCRATCHES: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// How many of `given` scratch buffers a table takes that holds `kept` of at
+/// most `most`; the rest is let go.
+fn batches_kept(kept: usize, given: usize, most: usize) -> usize {
+    given.min(most.saturating_sub(kept))
+}
+
+/// A list is done with the scratch buffers of its batched clamps (it was
+/// reset after its submissions ran): kept for the next recordings
+/// ([`batch_pool`]).
+fn give_batches(mut buffers: Vec<ID3D12Resource>) {
+    if buffers.is_empty() {
+        return;
+    }
+    {
+        let mut spare = SPARE_BATCHES.lock().unwrap_or_else(|e| e.into_inner());
+        let kept = batches_kept(spare.len(), buffers.len(), SPARE_BATCHES_MOST);
+        BATCH_SCRATCHES[2].fetch_add(kept as u64, Ordering::Relaxed);
+        BATCH_SCRATCHES[3].fetch_add((buffers.len() - kept) as u64, Ordering::Relaxed);
+        spare.extend(buffers.drain(..kept).map(SpareBatch));
+    }
+    // The rest is released outside the lock.
+    drop(buffers);
+}
+
+/// A scratch buffer for eight batches of clamped records, in the common
+/// state: one kept ([`SPARE_BATCHES`]) or a new one.
+fn take_batch_scratch() -> Option<ID3D12Resource> {
+    if batch_pool()
+        && let Some(SpareBatch(buffer)) = SPARE_BATCHES.lock().unwrap_or_else(|e| e.into_inner()).pop()
+    {
+        BATCH_SCRATCHES[1].fetch_add(1, Ordering::Relaxed);
+        return Some(buffer);
+    }
+    BATCH_SCRATCHES[0].fetch_add(1, Ordering::Relaxed);
+    let made = host()?.uav_buffer(BATCH_SCRATCH)?;
+    name(&made, || format!("indirect batches {BATCH_SCRATCH:#x}"));
+    Some(made)
+}
+
+/// For the frame-rate line: what [`batch_pool`] did per frame, if a batch
+/// took a buffer or a list gave some back.
+fn batch_scratch_line(frames: f64) {
+    let b: Vec<u64> = BATCH_SCRATCHES.iter().map(|b| b.swap(0, Ordering::Relaxed)).collect();
+    if b.iter().all(|&n| n == 0) {
+        return;
+    }
+    let kept = SPARE_BATCHES.lock().unwrap_or_else(|e| e.into_inner()).len();
+    tracing::info!(
+        "scratch buffers of batched clamps per frame: {:.1} made, {:.1} taken from those kept; at their lists' resets {:.1} kept and \
+         {:.1} let go; {kept} kept now, {:.1} MB of the card's memory (LEONIDA_BATCH_SCRATCH_POOL=0: a list keeps all it ever took, \
+         as before; now {})",
+        b[0] as f64 / frames,
+        b[1] as f64 / frames,
+        b[2] as f64 / frames,
+        b[3] as f64 / frames,
+        (kept as u64 * BATCH_SCRATCH) as f64 / (1 << 20) as f64,
+        if batch_pool() { "on" } else { "off" }
+    );
+}
+
 /// A scratch chunk of `size` bytes: one kept ([`SPARE`]) or a new one.
 fn take_chunk(host: &Host, size: u64) -> Option<Chunk> {
     if scratch_pool()
@@ -4546,6 +4665,7 @@ fn late_line(frames: f64) {
     }
     card_steps::log(frames);
     read_backs_line(frames);
+    batch_scratch_line(frames);
     dynamic_wait_line(frames);
     crate::draw::waits_line(frames);
     crate::watch::port_guard_line(frames);
@@ -7443,6 +7563,16 @@ impl HostList {
                 give_chunks(std::mem::take(&mut scratch.chunks));
             }
         }
+        // The scratch buffers of its batched clamps, likewise: the next
+        // recording to ask takes them ([`batch_pool`]).
+        if batch_pool() {
+            let given = {
+                let mut args = self.batch_args.lock().unwrap_or_else(|e| e.into_inner());
+                args.1 = 0;
+                std::mem::take(&mut args.0)
+            };
+            give_batches(given);
+        }
         // SAFETY: the list is not executing.
         let reset = unsafe {
             self.allocator
@@ -8325,18 +8455,16 @@ impl HostList {
     }
 
     /// Where the next batch of clamped records goes: a device-local buffer
-    /// the list keeps from recording to recording, the batch's place in it
-    /// and the state the buffer is in. Every batch of a recording has a place
-    /// of its own: the executions before it may still read theirs.
+    /// the list keeps until it is reset ([`batch_pool`]; without it, from
+    /// recording to recording), the batch's place in it and the state the
+    /// buffer is in. Every batch of a recording has a place of its own: the
+    /// executions before it may still read theirs.
     pub(crate) fn batch_place(&self) -> Option<(ID3D12Resource, u32, D3D12_RESOURCE_STATES)> {
         use crate::indirect::batch::{JOBS, SLOT};
         let mut args = self.batch_args.lock().unwrap_or_else(|e| e.into_inner());
         let (buffer, i) = ((args.1 / BATCHES) as usize, args.1 % BATCHES);
         if buffer == args.0.len() {
-            let size = u64::from(BATCHES * JOBS * SLOT);
-            let made = host()?.uav_buffer(size)?;
-            name(&made, || format!("indirect batches {size:#x}"));
-            args.0.push(made);
+            args.0.push(take_batch_scratch()?);
         }
         args.1 += 1;
         // (Its first batch finds it as the recording before left it:
@@ -8882,6 +9010,76 @@ mod read_back_pool_tests {
         let fourth = host.read_back_buffer(size).unwrap();
         assert_ne!(fourth.as_raw() as usize, first);
         drop((other, third, fourth, named));
+    }
+}
+
+#[cfg(test)]
+mod batch_scratch_tests {
+    use super::*;
+    use windows::core::Interface;
+
+    #[test]
+    fn the_table_of_batch_scratch_buffers_takes_what_it_has_room_for() {
+        assert_eq!(batches_kept(0, 5, 1024), 5);
+        assert_eq!(batches_kept(1020, 10, 1024), 4);
+        assert_eq!(batches_kept(1024, 3, 1024), 0);
+        // (Never more than it may hold, if it ever held more.)
+        assert_eq!(batches_kept(2000, 3, 1024), 0);
+        assert_eq!(batches_kept(7, 0, 1024), 0);
+        // A buffer holds eight batches of 256 records of 32 bytes.
+        assert_eq!(BATCH_SCRATCH, 65_536);
+    }
+
+    /// A list's scratch buffers of batched clamps are its own until it is
+    /// reset, and nobody's after: the list holds none, the table (or whoever
+    /// took them from it since: the table is the process's) holds them, and
+    /// the next recording starts from a buffer's first place, in the common
+    /// state.
+    #[test]
+    fn a_reset_list_gives_its_batch_scratch_buffers_back() {
+        use crate::indirect::batch::{JOBS, SLOT};
+        let Some(host) = host() else {
+            eprintln!("no D3D12 device; the table of batch scratch buffers not tested");
+            return;
+        };
+        if !batch_pool() {
+            return;
+        }
+        let list = host.new_list().unwrap();
+        // Nine batches: eight in one buffer, the ninth in the next.
+        let places: Vec<_> = (0..9).map(|_| list.batch_place().unwrap()).collect();
+        let raw = |i: usize| places[i].0.as_raw() as usize;
+        for i in 0..8 {
+            assert_eq!(raw(i), raw(0));
+            assert_eq!(places[i].1, i as u32 * JOBS * SLOT);
+            let state = if i == 0 { D3D12_RESOURCE_STATE_COMMON } else { D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT };
+            assert_eq!(places[i].2, state);
+        }
+        assert_ne!(raw(8), raw(0));
+        assert_eq!((places[8].1, places[8].2), (0, D3D12_RESOURCE_STATE_COMMON));
+        // SAFETY: a live buffer.
+        assert_eq!(unsafe { places[0].0.GetDesc() }.Width, BATCH_SCRATCH);
+        // While the list holds them, another list's batch gets another buffer.
+        let other = host.new_list().unwrap();
+        let theirs = other.batch_place().unwrap();
+        assert!(theirs.0.as_raw() as usize != raw(0) && theirs.0.as_raw() as usize != raw(8));
+        list.close();
+        list.reset();
+        {
+            let args = list.batch_args.lock().unwrap();
+            assert!(args.0.is_empty());
+            assert_eq!(args.1, 0);
+        }
+        // Not let go: something holds each beside the references here.
+        assert!(!sole(&places[0].0) && !sole(&places[8].0));
+        // The next recording of the list starts as its first did.
+        let again = list.batch_place().unwrap();
+        assert_eq!((again.1, again.2), (0, D3D12_RESOURCE_STATE_COMMON));
+        assert_ne!(again.0.as_raw(), theirs.0.as_raw());
+        list.close();
+        list.reset();
+        other.close();
+        other.reset();
     }
 }
 
