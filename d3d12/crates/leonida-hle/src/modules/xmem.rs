@@ -1217,8 +1217,10 @@ pub extern "system" fn XMemMapPhysicalPages(
     // Until the pages are mapped again: `unmap` takes whole views away and
     // maps what stays of them again, and a mapped view is a reservation
     // until it is committed. A read of title memory in place must not fall
-    // into that gap (`leonida_gpu::title_memory_remapping`).
-    let _changing = leonida_gpu::title_memory_remapping();
+    // into that gap (`leonida_gpu::title_memory_remapping`). The gap is
+    // said: reads in place of other memory go on beside it.
+    let touched = views_of(&physical, (0..n).map(|k| base + k * PAGE));
+    let _changing = leonida_gpu::title_memory_remapping_of(&touched);
     unmap(&mut physical, base, n * PAGE);
     let Some(pages) = pages else {
         return address;
@@ -1458,6 +1460,21 @@ pub fn map_aliases_later(ranges: &[(u64, u64, u64)]) -> Box<dyn FnOnce() -> bool
     Box::new(move || alias_pages(&pages) && ok)
 }
 
+/// What changing the mapping of the pages at `pages` may take away for its moment (first byte,
+/// past the last): each page, and the whole of the view it lies in ([`unmap`] unmaps a view to
+/// take a page out of it and maps the rest again).
+fn views_of(physical: &Physical, pages: impl Iterator<Item = usize>) -> Vec<(usize, usize)> {
+    pages
+        .map(|at| {
+            let view = physical.views.range(..=at).next_back().filter(|(base, (size, _))| at < **base + *size);
+            match view {
+                Some((base, (size, _))) => (*base, (*base + *size).max(at + PAGE)),
+                None => (at, at + PAGE),
+            }
+        })
+        .collect()
+}
+
 /// Maps each address of `pages` to what stands beside it (`None`: unmaps it), in order, a chunk
 /// ([`alias_chunk`]) under one taking of the locks: the second step of [`map_aliases_later`].
 fn alias_pages(pages: &[(usize, Option<Slice>)]) -> bool {
@@ -1469,8 +1486,10 @@ fn alias_pages(pages: &[(usize, Option<Slice>)]) -> bool {
     for part in pages.chunks(chunk) {
         let _busy = Busy::begin();
         let mut physical = physical();
-        // As in `XMemMapPhysicalPages`: no read in place meets the gap.
-        let _changing = leonida_gpu::title_memory_remapping();
+        // As in `XMemMapPhysicalPages`: no read in place meets the gap. The
+        // gap is said: reads in place of other memory go on beside it.
+        let touched = views_of(&physical, part.iter().map(|(to, _)| *to));
+        let _changing = leonida_gpu::title_memory_remapping_of(&touched);
         let same = |physical: &Physical, (to, slice): &(usize, Option<Slice>)| {
             alias_same() && slice.as_ref().is_some_and(|slice| shows(physical, *to, slice))
         };

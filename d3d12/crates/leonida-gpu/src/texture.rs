@@ -1181,7 +1181,7 @@ fn fill_plane(
     bytes: usize,
     pitch: usize,
 ) {
-    let _pin = crate::watch::title_memory_reading();
+    let _pin = crate::watch::title_memory_reading_range(at, len);
     // SAFETY: the list owns this full upload allocation until its GPU work completes.
     let out = unsafe { std::slice::from_raw_parts_mut(dst as *mut u8, bytes) };
     let mip = &layout.mips[0];
@@ -1553,9 +1553,11 @@ impl Staging {
             let Some(mapped) = crate::watch::title_memory_reading_now() else {
                 return self.refresh_unlocked(last, size);
             };
-            mapped
+            crate::watch::RangeReading::Whole(mapped)
         } else {
-            waited(2, crate::watch::title_memory_reading)
+            // Only a change of mapping that touches this texture's memory is
+            // waited for (`LEONIDA_REMAP_SPANS=0`: every change, as before).
+            waited(2, || crate::watch::title_memory_reading_range(self.memory as usize, size))
         };
         if !committed(self.memory, size) {
             // Partly mapped: a streamed texture with only some mips' pages

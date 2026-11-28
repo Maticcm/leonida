@@ -10817,10 +10817,14 @@ impl Meter {
             let [changes, waiting, held] =
                 [0, 1, 2].map(|i| crate::watch::REMAP_TIMES[i].swap(0, Ordering::Relaxed) as f64 / frames);
             let longest = crate::watch::REMAP_TIMES[3].swap(0, Ordering::Relaxed) as f64 / 1000.0;
+            let [named, passed, stood] =
+                [0, 1, 2].map(|i| crate::watch::SPAN_READS[i].swap(0, Ordering::Relaxed) as f64 / frames);
             if changes > 0.0 {
                 tracing::info!(
                     "the runtime's changes of mapping per frame: {changes:.1}, {:.2} ms waiting for reads in place to end, \
-                     {:.2} ms holding title memory still (longest {longest:.2} ms)",
+                     {:.2} ms holding title memory still (longest {longest:.2} ms); of {named:.0} reads in place that named \
+                     their range, {passed:.1} went on beside a change of other memory and {stood:.1} waited for one of \
+                     their own (LEONIDA_REMAP_SPANS=0: all wait for every change)",
                     waiting / 1000.0,
                     held / 1000.0
                 );

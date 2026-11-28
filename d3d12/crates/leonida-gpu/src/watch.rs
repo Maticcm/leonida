@@ -3750,6 +3750,105 @@ pub fn title_memory_splitting(at: usize, len: usize) {
 /// does.
 static MAPPING: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+/// Whether a read in place that names its range ([`title_memory_reading_range`])
+/// waits only for the changes of mapping that touch that range
+/// (`LEONIDA_REMAP_SPANS=0`: for every change, as before; `LEONIDA_AB` can
+/// name it).
+///
+/// [`MAPPING`] is one lock for all of title memory, and while the world
+/// streams the runtime holds it most of the time: the GPU's page mappings come
+/// 16 pages to a hold, each page an unmapping and a mapping the kernel takes
+/// 0.1 to 3 ms for. Standing at a save with the idle camera (Series X profile,
+/// Ryzen 5 7600X, 2026-11-27) that was 5 to 13 ms a frame held and 2 to 7 ms
+/// of all threads' texture refreshes waiting; in a run where the title streamed
+/// through the measurement, 192 ms a frame held, 352 ms of refreshes waiting
+/// and frames of 160 to 580 ms (logs s3-base, s4-thin6). Nearly every refresh
+/// that waited was of a texture whose pages the change did not touch: the
+/// title maps the pages of the textures that arrive, and the refreshes are of
+/// all the textures the frame draws with.
+///
+/// What a change unmaps for its moment is known before it begins: the views
+/// its pages lie in ([`title_memory_remapping_of`]; a page of a longer view
+/// takes the whole view away and brings the rest back). A read of memory
+/// outside those views meets no gap, so it goes on beside the change. A
+/// change that does not say what it touches counts as touching everything.
+fn remap_spans() -> bool {
+    crate::toggled!("LEONIDA_REMAP_SPANS")
+}
+
+/// What changes of mapping touch and what is read in place beside them
+/// ([`remap_spans`]).
+struct Spans {
+    /// The number of the last change that declared its spans.
+    last: u64,
+    /// Changes under way or waiting to begin: their number, and the spans
+    /// (first byte, past the last) they may unmap for their moment.
+    changing: Vec<(u64, Vec<(usize, usize)>)>,
+    /// Ranges being read in place by readers that named them.
+    reading: Vec<(usize, usize)>,
+}
+
+impl Spans {
+    /// Whether a change touches `[start, end)`.
+    fn changes(&self, start: usize, end: usize) -> bool {
+        self.changing.iter().any(|(_, of)| of.iter().any(|&(a, b)| a < end && start < b))
+    }
+
+    /// Whether a named read is under way in what change `number` touches.
+    fn read(&self, number: u64) -> bool {
+        self.changing.iter().find(|(n, _)| *n == number).is_some_and(|(_, of)| {
+            self.reading.iter().any(|&(start, end)| of.iter().any(|&(a, b)| a < end && start < b))
+        })
+    }
+}
+
+static SPANS: Mutex<Spans> = Mutex::new(Spans { last: 0, changing: Vec::new(), reading: Vec::new() });
+
+/// A change or a named read ended: who waits for it looks again.
+static SPANS_MOVED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// Since the last frame-rate line, of the reads in place that named their
+/// range ([`title_memory_reading_range`], with [`remap_spans`]): how many
+/// there were, how many went on beside a change under way that did not touch
+/// them, and how many waited for one that did.
+pub(crate) static SPAN_READS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// `of`, in order and with those that touch joined.
+fn joined(of: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut sorted: Vec<(usize, usize)> = of.iter().copied().filter(|&(a, b)| a < b).collect();
+    sorted.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(sorted.len());
+    for (a, b) in sorted {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+/// A change of mapping is to begin that may unmap `of` for its moment: no
+/// named read of them begins from now on, and those under way are waited
+/// for. Its number, for [`undeclare`].
+fn declare(of: &[(usize, usize)]) -> u64 {
+    let mut spans = SPANS.lock().unwrap_or_else(|e| e.into_inner());
+    spans.last += 1;
+    let number = spans.last;
+    spans.changing.push((number, joined(of)));
+    while spans.read(number) {
+        spans = SPANS_MOVED.wait(spans).unwrap_or_else(|e| e.into_inner());
+    }
+    number
+}
+
+/// Change `number` is done.
+fn undeclare(number: u64) {
+    let mut spans = SPANS.lock().unwrap_or_else(|e| e.into_inner());
+    spans.changing.retain(|(n, _)| *n != number);
+    drop(spans);
+    SPANS_MOVED.notify_all();
+}
+
 /// What the runtime holds while it changes what title memory shows
 /// ([`title_memory_remapping`]).
 pub struct Remapping(
@@ -3759,6 +3858,8 @@ pub struct Remapping(
     Option<i32>,
     /// Who took it.
     &'static std::panic::Location<'static>,
+    /// Its number among the changes that declared what they touch ([`SPANS`]).
+    u64,
 );
 
 impl Drop for Remapping {
@@ -3779,6 +3880,9 @@ impl Drop for Remapping {
                 tracing::info!(n, held_ms = held / 1000, at = %self.3, "a change of mapping held title memory still for long");
             }
         }
+        // What it took away is back: named reads of it may begin (the others
+        // when the lock goes, right after this).
+        undeclare(self.4);
         if let Some(before) = self.2 {
             use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority};
             // SAFETY: a plain call on this thread.
@@ -3946,6 +4050,17 @@ pub(crate) fn lost(what: &'static str, at: usize, len: usize) {
 /// around the whole change, the unmapping and the mapping again.
 #[track_caller]
 pub fn title_memory_remapping() -> Remapping {
+    // Nothing said of what it touches: everything.
+    title_memory_remapping_of(&[(0, usize::MAX)])
+}
+
+/// [`title_memory_remapping`], for a change that unmaps nothing outside `of`
+/// (first byte, past the last) for its moment: every view that holds a page
+/// it changes, whole (a page of a longer view takes the view away and brings
+/// the rest back). Reads in place that named a range outside `of` go on
+/// beside it ([`title_memory_reading_range`]); all others wait as before.
+#[track_caller]
+pub fn title_memory_remapping_of(of: &[(usize, usize)]) -> Remapping {
     // For the title's own threads ([`came_back`]).
     install();
     let met = MET.load(std::sync::atomic::Ordering::Relaxed);
@@ -3973,6 +4088,9 @@ pub fn title_memory_remapping() -> Remapping {
         }
     });
     let asked = std::time::Instant::now();
+    // The named reads of what it touches end first, and none begins; then
+    // the reads that named nothing.
+    let number = declare(of);
     let changing = MAPPING.write().unwrap_or_else(|e| e.into_inner());
     let got = std::time::Instant::now();
     REMAP_TIMES[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3984,7 +4102,60 @@ pub fn title_memory_remapping() -> Remapping {
         got,
         before.filter(|&b| b < windows_sys::Win32::System::Threading::THREAD_PRIORITY_HIGHEST),
         std::panic::Location::caller(),
+        number,
     )
+}
+
+/// What a read of a range of title memory in place holds
+/// ([`title_memory_reading_range`]).
+pub enum RangeReading {
+    /// As [`title_memory_reading`]: no change of mapping at all meanwhile.
+    Whole(#[allow(dead_code)] Reading),
+    /// The range, noted in [`SPANS`]: no change that touches it meanwhile.
+    Range(usize, usize),
+}
+
+impl Drop for RangeReading {
+    fn drop(&mut self) {
+        let RangeReading::Range(start, end) = *self else {
+            return;
+        };
+        let mut spans = SPANS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = spans.reading.iter().position(|&r| r == (start, end)) {
+            spans.reading.swap_remove(at);
+        }
+        let waited_for = !spans.changing.is_empty();
+        drop(spans);
+        if waited_for {
+            SPANS_MOVED.notify_all();
+        }
+    }
+}
+
+/// For reading `[at, at + len)` of title memory in place: until what it
+/// returns is dropped, the runtime changes no mapping that touches the range,
+/// so memory found mapped there stays mapped. A change elsewhere goes on
+/// beside the read ([`remap_spans`]; without it this is
+/// [`title_memory_reading`]). Not to be taken by a thread that holds another
+/// of these or a [`Reading`], nor held across anything that maps title memory.
+pub fn title_memory_reading_range(at: usize, len: usize) -> RangeReading {
+    if !remap_spans() {
+        return RangeReading::Whole(title_memory_reading());
+    }
+    let (start, end) = (at, at.saturating_add(len.max(1)));
+    let count = |i: usize| SPAN_READS[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    count(0);
+    let mut spans = SPANS.lock().unwrap_or_else(|e| e.into_inner());
+    if spans.changes(start, end) {
+        count(2);
+        while spans.changes(start, end) {
+            spans = SPANS_MOVED.wait(spans).unwrap_or_else(|e| e.into_inner());
+        }
+    } else if !spans.changing.is_empty() {
+        count(1);
+    }
+    spans.reading.push((start, end));
+    RangeReading::Range(start, end)
 }
 
 /// What a read of title memory in place holds ([`title_memory_reading`]).
@@ -5694,6 +5865,80 @@ mod mapping_tests {
         drop(changing);
         reader.join().unwrap();
         assert!(read.load(Ordering::SeqCst));
+    }
+
+    /// Addresses no test maps anything at: what is asked of them is only
+    /// who waits for whom.
+    const FAR: usize = 0x7a00_0000_0000;
+
+    /// Runs `f` on a thread of its own; what tells when it is done.
+    fn beside(f: impl FnOnce() + Send + 'static) -> (std::thread::JoinHandle<()>, mpsc::Receiver<()>) {
+        let (done, wait) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            f();
+            let _ = done.send(());
+        });
+        (thread, wait)
+    }
+
+    /// A read that names its range waits for a change that touches the range,
+    /// and a change for the named reads of what it touches. (Who goes on
+    /// beside whom is asked of the table itself, below: other tests change
+    /// mappings in this process, and a test that held one of these while it
+    /// waited for a thread of its own to pass could wait for them in a ring.)
+    #[test]
+    fn a_named_read_and_a_change_of_its_memory_wait_for_each_other() {
+        use super::{title_memory_reading_range, title_memory_remapping_of};
+        // A change holds two spans; a read of a byte of the second does not begin.
+        let changing = title_memory_remapping_of(&[(FAR, FAR + 0x1_0000), (FAR + 0x4_0000, FAR + 0x5_0000)]);
+        let (touched, done) = beside(|| drop(title_memory_reading_range(FAR + 0x4_ffff, 16)));
+        assert!(done.recv_timeout(Duration::from_millis(100)).is_err(), "a read began in memory being changed");
+        drop(changing);
+        done.recv_timeout(Duration::from_secs(60)).expect("the read went on after the change");
+        touched.join().unwrap();
+        // A read holds a range; a change of a view around its second page does not begin.
+        const AT: usize = FAR + 0x100_0000;
+        let reading = title_memory_reading_range(AT + 0x1_0000, 0x2_0000);
+        let (touching, done) = beside(|| drop(title_memory_remapping_of(&[(AT + 0x2_0000, AT + 0x3_0000)])));
+        assert!(done.recv_timeout(Duration::from_millis(100)).is_err(), "the mapping changed under a named read");
+        drop(reading);
+        done.recv_timeout(Duration::from_secs(60)).expect("the change went on after the read");
+        touching.join().unwrap();
+    }
+
+    /// What touches what, to the byte: a change's spans and a read's range
+    /// that only meet at their ends do not wait for each other, and a change
+    /// that names nothing touches everything.
+    #[test]
+    fn only_what_touches_waits() {
+        use super::{Spans, joined};
+        let mut spans = Spans { last: 2, changing: Vec::new(), reading: Vec::new() };
+        spans.changing.push((1, joined(&[(0x1_0000, 0x2_0000), (0x4_0000, 0x5_0000)])));
+        // A read: between the spans, at their ends, inside one.
+        assert!(!spans.changes(0x2_0000, 0x4_0000));
+        assert!(!spans.changes(0, 0x1_0000) && !spans.changes(0x5_0000, 0x6_0000));
+        assert!(spans.changes(0x1_ffff, 0x2_0000) && spans.changes(0x3_ffff, 0x4_0001) && spans.changes(0, usize::MAX));
+        // A change: the reads under way in its spans, and no others.
+        spans.reading.push((0x2_0000, 0x4_0000));
+        assert!(!spans.read(1));
+        spans.reading.push((0x4_8000, 0x4_8010));
+        assert!(spans.read(1));
+        // One that says nothing of what it touches waits for every read, and every read for it.
+        spans.changing.push((2, joined(&[(0, usize::MAX)])));
+        assert!(spans.read(2) && spans.changes(0x2_0000, 0x2_0001));
+        spans.reading.clear();
+        assert!(!spans.read(1) && !spans.read(2));
+        // A change that is done is no longer in the table: nothing waits for it.
+        assert!(!spans.read(7));
+    }
+
+    /// The spans a change declares are kept in order, those that touch as one.
+    #[test]
+    fn declared_spans_are_joined() {
+        use super::joined;
+        assert_eq!(joined(&[(30, 40), (10, 20), (20, 25), (5, 5), (38, 50)]), vec![(10, 25), (30, 50)]);
+        assert_eq!(joined(&[(0, usize::MAX), (7, 9)]), vec![(0, usize::MAX)]);
+        assert!(joined(&[]).is_empty());
     }
 }
 
