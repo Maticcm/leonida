@@ -3996,7 +3996,7 @@ impl State {
     /// The stand-in for the indirect light after a dispatch of `p`
     /// (`crate::ambient`). Whether it recorded anything.
     fn ambient(&self, list: &HostList, p: &HostPipeline, role: crate::ambient::Role) -> bool {
-        use crate::ambient::{AIR, DEPTH, LIGHT, RADIANCE, REFLECTIONS, Role, Views};
+        use crate::ambient::{AIR, DEPTH, LIGHT, RADIANCE, REFLECTIONS, Role, TRUE_DEPTH, Views};
         let Some(t) = p.stages.first().map(|s| s.translated()) else {
             return false;
         };
@@ -4039,14 +4039,28 @@ impl State {
         };
         let depth = match role {
             Role::Resolve => {
-                let Some((seen, depth)) = entry(ResourceType::Srv, DEPTH) else {
+                let fits = |seen: &D3D12_RESOURCE_DESC| {
+                    seen.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D
+                        && seen.SampleDesc.Count == 1
+                        && (seen.Width, seen.Height) == (of.Width, of.Height)
+                };
+                // (`LEONIDA_AMBIENT_TRUE_DEPTH=1`: the view the fork found the depth at, where
+                // this resolve has a depth plane of the image's size there.)
+                let other = crate::ambient::true_depth()
+                    .then(|| entry(ResourceType::Srv, TRUE_DEPTH))
+                    .flatten()
+                    .filter(|(seen, _)| fits(seen));
+                if other.is_some() {
+                    static ONCE: std::sync::Once = std::sync::Once::new();
+                    ONCE.call_once(|| {
+                        tracing::info!("the indirect light's stand-in reads depth at table offset 688 (LEONIDA_AMBIENT_TRUE_DEPTH=1)")
+                    });
+                }
+                let Some((seen, depth)) = other.or_else(|| entry(ResourceType::Srv, DEPTH)) else {
                     once!(?role, "no stand-in for the indirect light: missing depth SRV");
                     return false;
                 };
-                if seen.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
-                    || seen.SampleDesc.Count != 1
-                    || (seen.Width, seen.Height) != (of.Width, of.Height)
-                {
+                if !fits(&seen) {
                     once!(?role, "no stand-in for the indirect light: depth dimensions differ");
                     return false;
                 }

@@ -232,7 +232,16 @@ if ($env:LEONIDA_WATER_TRANSMISSION -ne '1') {
     # The whole family (the water's CS_TransmissionVolumetrics, findings.md): another configuration binds another
     # variant (1440p output with render scale 1.0: 5dc3b25986622949, whose paired form left a band of blocks over the
     # lower fifth of the picture, 2026-11-27).
-    $skip = @('6f225b641c5b0708', '5dc3b25986622949', '926c46bab3b86bd6', '2889c21328c69e58', '6871d6e4b3ac9a10', '888af37a584acf98', 'a10179ab7eda0dc3')
+    # Five, not the seven dropped from cef91163b on: 2889c21328c69e58 and 888af37a584acf98 were counted with the
+    # family because they trip on the same thing (findings.md), but by the entry points in their containers they are
+    # CS_GenerateShadowMasks_SampleHairScreenSpace and CS_GenerateShadowMasksHairOnly_SampleHairScreenSpace: the
+    # sun's shadow mask where hair is sampled on screen. Dropped, what they would have written keeps an old mask
+    # (edsuuu/VI-BR-PORT b120167 saw that as blocky, lit hair with another program of that pass out). They run again;
+    # the reason for the drop was the water's blocks, nothing is noted against these two, and they ran until that
+    # commit. Not looked at in a run since:
+    # LEONIDA_HAIR_SHADOW_MASKS=0 in the window's environment drops them as before.
+    $skip = @('6f225b641c5b0708', '5dc3b25986622949', '926c46bab3b86bd6', '6871d6e4b3ac9a10', 'a10179ab7eda0dc3')
+    if ($env:LEONIDA_HAIR_SHADOW_MASKS -eq '0') { $skip += '2889c21328c69e58', '888af37a584acf98' }
     if ($settings.LEONIDA_SKIP_PIPELINES) { $skip = @($settings.LEONIDA_SKIP_PIPELINES) + $skip }
     $settings.LEONIDA_SKIP_PIPELINES = $skip -join ','
 }

@@ -468,6 +468,58 @@ fn parse_paired_lanes(value: Option<&str>) -> PairedLanes {
     }
 }
 
+/// The forms asked for one program by name ([`with_forms_for`]), over what the switches say for
+/// every program. Both only matter for a console wave64 compute program on a host of 32-lane
+/// waves that does not translate as it is: any other program is left alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FormsFor {
+    /// The paired form ([`paired`]) before every other, the forms the chain counts as exact
+    /// included: as [`PairedLanes::First`] for this program.
+    pub paired_first: bool,
+    /// The wave-wide form ([`widen`]) before the approximate ones, as `LEONIDA_WAVE_WIDE=1` for
+    /// this program, and not the paired form in its place.
+    pub wide: bool,
+}
+
+thread_local! {
+    /// See [`with_forms_for`].
+    static FORMS_FOR: std::cell::Cell<FormsFor> =
+        const { std::cell::Cell::new(FormsFor { paired_first: false, wide: false }) };
+}
+
+/// Runs `f` (a translation, on this thread) with `forms` asked for its program.
+///
+/// For trying a form on one program, or finding by halves the program a form goes wrong for,
+/// without every other program changing with it: the forms the chain counts as exact may still be
+/// the wrong ones for a program. What the fork found with it, in its own chain of forms: the
+/// water's tile list (`CS_TransmissionVolumetrics_GenerateTiles`, `1aa247ed3653b616`) took a form
+/// counted as exact and whole tiles of the tiled water light were left unlit in a recorded
+/// frame, all of them lit with that one program in the paired form; the light clustering
+/// (`d3e5b737ea7cc150`, `55d2bce91ec9abcc`) is given half of the lights in each half of its cells
+/// by the approximate form; and wave-wide for every program lost the card as the world started.
+/// Which form this tree's chain takes for the tile and resolve programs of the transparent
+/// passes is in `docs/findings.md` ("Forms of the tile and resolve programs").
+///
+/// The caller names the programs and keys its cache by what it asks (`leonida-gpu`'s
+/// `shader_cache`: the lists `LEONIDA_PAIRED_FOR` and `LEONIDA_WAVE_WIDE_FOR`); the translator
+/// reads no switch for it, so the other programs' translations stay as they are.
+///
+/// After edsuuu/VI-BR-PORT 7318dee, 1fa0ed1 and cf3394b (edsuuu; `VICTORY_WAVE_WIDE_FOR`,
+/// `VICTORY_WAVE_PAIRED_FOR`), GPL-3.0. The paired form itself is this tree's
+/// ([`PairedLanes`]), not theirs.
+pub fn with_forms_for<R>(forms: FormsFor, f: impl FnOnce() -> R) -> R {
+    /// Puts the thread's choice back, also when `f` panics (a pipeline's build is caught and
+    /// its thread goes on to other programs).
+    struct Back(FormsFor);
+    impl Drop for Back {
+        fn drop(&mut self) {
+            FORMS_FOR.set(self.0);
+        }
+    }
+    let _back = Back(FORMS_FOR.replace(forms));
+    f()
+}
+
 #[cfg(test)]
 thread_local! {
     /// A test's choice for [`paired_lanes`], for its thread only.
@@ -655,11 +707,13 @@ pub fn emit(
         };
         let done = |r: &Result<(HostShader, Option<u32>), ShaderError>| matches!(r, Ok((_, wave)) if *wave != Some(64));
         // The paired form (`paired`): with `LEONIDA_PAIRED_LANES=first` before every other form,
-        // else right before the wave-wide one.
-        let pairs = paired_lanes();
+        // else right before the wave-wide one. A program asked for by name ([`with_forms_for`])
+        // takes it first whatever the switch says.
+        let named = FORMS_FOR.get();
+        let pairs = if named.paired_first { PairedLanes::First } else { paired_lanes() };
         if pairs == PairedLanes::First {
             let again = paired(c, native, p, why);
-            report("paired lanes (first)", &again);
+            report(if named.paired_first { "paired lanes (first, named)" } else { "paired lanes (first)" }, &again);
             if done(&again) {
                 return again.map(|(shader, _)| shader);
             }
@@ -747,7 +801,8 @@ pub fn emit(
                 [0x58, 0x1d, 0xab, 0x2c, 0xd8, 0xbc, 0xf2, 0x2e, 0x5c, 0x96, 0x4b, 0x98, 0xe9, 0x03, 0x48, 0xd1]
                     | [0x24, 0x31, 0xbb, 0xe7, 0xdc, 0x15, 0x4a, 0xd7, 0x59, 0xd2, 0x0b, 0xc9, 0x54, 0x82, 0x9c, 0x1c]
             );
-        let wide_on = wide_option.as_ref().map_or(scene_kernel, |v| v == "1");
+        // (or for this program alone: [`with_forms_for`])
+        let wide_on = named.wide || wide_option.as_ref().map_or(scene_kernel, |v| v == "1");
         // A single guest wave can iterate an active-lane loop until both host
         // halves have finished. The precise latch and convergence conditions
         // for the driver compute route are checked by widen().
@@ -787,7 +842,8 @@ pub fn emit(
                 // Still stopped where not every lane runs: the per-lane branches around
                 // those places taken as the console takes them, by the whole wave at once
                 // ([`widen`]), at two group barriers per such branch.
-                if wide_on && pairs == PairedLanes::BeforeWide {
+                // (not for a program named for the wave-wide form itself)
+                if wide_on && pairs == PairedLanes::BeforeWide && !named.wide {
                     let again = paired(c, native, p, why);
                     report("paired lanes", &again);
                     if done(&again) {
