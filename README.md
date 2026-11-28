@@ -48,7 +48,12 @@ Telegram: https://t.me/mandyport
 
 ## Project status
 
-**Early. Nothing is playable yet.** On `main`, the game boots from your own copy on native Windows and on Linux
+**Early, and playable in the world on one of its two runtimes.** The Direct3D 12 runtime in
+[`d3d12/`](d3d12/README.md) loads a save into the open world on Windows, where you control the character with the
+HUD, the map and the pause menu working, at a low frame rate (12 to 13 frames a second on the maintainer's PC; the
+measurements are at the end of this section). The rest of this section up to there is about the other runtime, the
+recompiled one with the D3D12 → Vulkan layer (`runtime/`), which is not playable yet. With that one, on `main`, the
+game boots from your own copy on native Windows and on Linux
 through Proton: it shows the launch movie, the first-run pages and the landing prompt, which respond to a pad or
 the keyboard pad, then runs the story load to its end and enters the world phase. A first world frame has not been
 verified yet on any test machine. On native Windows a scripted pad alone (`LEONIDA_INPUT_SCRIPT`, no keyboard or
@@ -57,15 +62,16 @@ the loading screen of the story load ([the route](docs/first_run_ui.md#through-t
 [First-run UI on Windows](docs/first_run_ui.md) has the build and launch steps;
 [the Linux/Proton report](docs/linux_proton.md) has the timings and where it stops.
 
-**The second runtime, [`d3d12/`](d3d12/README.md) (Direct3D 12, Windows, NVIDIA and AMD), does reach the world.**
+**The Direct3D 12 runtime, [`d3d12/`](d3d12/README.md) (Windows, NVIDIA and AMD), is playable in the world.**
 It is a separate program (`leonida.exe`) that grew from VIctory; what follows are this project's own measurements,
 taken by the maintainer on 2026-11-27 with the branch state of that day (commit `37426fd9f`), not figures quoted
 from another project:
 
 - PC: Ryzen 5 7600X (6 cores), GeForce RTX 4060 Ti 16 GB (driver 616.64), 32 GB of RAM, Windows 11.
 - Series X profile, 2560x1440 picture, the title's own upscaler at render scale 1, no generated frames.
-- A save loads into the open world and the character can be walked with a pad or with keyboard and mouse, with
-  sound. **12 to 13 frames a second** standing at the save point (median frame 75 to 82 ms in three runs of about
+- A save loads into the open world and you play from there: the character walks and drives with a pad (Xbox or
+  PlayStation, with matching button prompts) or with keyboard and mouse, with sound, the HUD, the map, the weapon
+  wheel and the pause menu. **12 to 13 frames a second** standing at the save point (median frame 75 to 82 ms in three runs of about
   three minutes, about 7,100 draws a frame); the game uses about 5.6 of the 6 cores and the card is about 95% busy.
 - Known to be wrong in the picture: a stair-stepped part of the screen near the camera gets no indirect light at
   that save point; ray-traced light is stood in for (every ray is a miss, the structure builder is off); the
@@ -97,7 +103,8 @@ and the `D3D-` items), run `python -I tools/progress_dashboard.py --out <folder 
 
 ## Platforms
 
-Nothing is playable on any platform yet (see *Project status*). What runs where today:
+The Direct3D 12 runtime in `d3d12/` is playable in the world on Windows (see *Project status*); the recompiled runtime with the
+Vulkan layer is not playable on any platform yet. What runs where today, for the latter:
 
 | Platform | Today |
 |---|---|
