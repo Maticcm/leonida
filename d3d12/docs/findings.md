@@ -340,6 +340,45 @@ targets of `PS_AlphaVelocityDepthResolve` in a dump (`LEONIDA_DUMP_TARGETS=1`): 
 depth at an opaque edge in front of glass. Not ported: trustno1's stand-in for reflections
 after `CS_RayMiss` (2db59d4 and five more), which is where the blue comes from.
 
+**Forms of the tile and resolve programs (2026-11-27).** For the region with a
+stair-stepped edge at a glass door (the railing and a character's legs in front of it
+see-through, a displaced copy of other railing over the floor): which form the translator
+takes, on a host of 32-lane waves, for the compute programs that work by tile or resolve
+the transparent passes. Without the game and without a card: the translator alone
+(`LEONIDA_WAVE_WHY=1`), over the 81 compute programs one run had made
+(`known-shaders.bin`) whose entry points are named `CS_Alph*`, `CS_TileClassification*`,
+`*TemporalResolve*`, `CS_RayMiss*`, `CS_ScreenProbe_RayMiss`, `CS_ResolveScreenSpace*`,
+`CS_ResolveToMirrorGBuffer`, `CS_*Alpha*` of the traced transparents, `CS_Composite*` and
+`CS_TransmissionVolumetrics*`. What a form computes on a card is not in this.
+
+| form | programs |
+|---|---|
+| as they are | 60, among them `CS_RayMiss`, `CS_ResolveScreenSpace`, `CS_ResolveToMirrorGBuffer`, `CS_AlphaTransmissionHistoryResolve`, `CS_AlphaTransmissionDenoise`, `CS_AlphaTransmissionDepthTileMipDilate`, the eight `CS_SceneColorTemporalResolve*`, the six `CS_ScreenProbes_TemporalResolve*` |
+| without early-outs (exact) | 9: `CS_AlphTransmissionPrefilterMip` 2da4beb386509b77, `CS_AlphaTransmissionDepthTileGenerationMip1` 5c6224a6bc3a4066 and `...Mip25` 9bdd33d77fb8ca0f, `CS_TemporalResolveAlpha` 068786c4b7e04851 and 1069ceb574bc92ca, `CS_TemporalResolveWater` 441c0b3940ddfa2d and 780546beec578f2c, `CS_TileClassificationNeighborhoodBoundary` f8a6133bfedc5759 and `...WithLookingGlassMask` 445c61b3089eb8f0 |
+| without skips (exact) | 3: `CS_TileClassificationNeighborhood3x3` 2b17036bf3a1d615 and `...WithLookingGlassMask` f83f0ca30c60c3ac, `CS_TransmissionVolumetrics_GenerateTiles` 1aa247ed3653b616 |
+| each half-wave its own results (`local waves (APPROXIMATE)`, without early-outs) | 4: `CS_TemporalResolve1_Opaque_FrameStatistics` 0ffd3b911e35e7d0, `CS_TemporalResolve2_Opaque_FrameStatistics` 71883e40620a567a, `CS_TemporalResolveOpaque2` 3c9d23fa83d63d43, `CS_TemporalResolveOpaque_FrameStatistics` 4031c6c05fa7ec48 |
+| paired lanes, last of all | 5, the water's: 5dc3b25986622949, 6f225b641c5b0708, 6871d6e4b3ac9a10, 926c46bab3b86bd6, a10179ab7eda0dc3 |
+| refused | none |
+
+So no pass of the glass's transmission is refused or approximate here. (edsuuu/VI-BR-PORT's
+window glass was `CS_AlphTransmissionPrefilterMip` refused by 32-lane hosts, their 30c29ed:
+the access's own guard among what is known of the lanes that read a descriptor, which this
+tree's tracer already had.) Four temporal resolves are approximate: what the console
+computes once for a tile of 8 x 8 is computed for each half of it. And the forms counted as
+exact are not proven so program by program:
+that fork found its water's tile list (`...GenerateTiles`) wrong in such a form, whole
+tiles unlit, and right in the paired form (cf3394b).
+
+To check, one group at a time (`LEONIDA_PAIRED_FOR=<hash>,<hash>`: the paired form before
+every other for the programs named, only those translated again; `shader_cache.rs`): the
+two looking-glass tile classifications (f83f0ca30c60c3ac, 445c61b3089eb8f0); the four
+approximate temporal resolves; the two `CS_TemporalResolveAlpha`. The paired form takes
+each of these (and the plain tile classifications, `...Mip25` and the tile list), again as
+the translator says, not a card. It does not take the two programs of 256 threads
+(`CS_AlphTransmissionPrefilterMip`, `...DepthTileGenerationMip1`: its host waves would have
+to meet), which keep their form. For the water: `...GenerateTiles` named, with
+`LEONIDA_WATER_TRANSMISSION=1` in the window's environment so that the family runs.
+
 ## Static samplers and the pipeline library on NVIDIA (2026-11-27)
 
 RTX 4060 Ti, driver 616.64, without the game: `pipeline/places/tests.rs` runs the test
