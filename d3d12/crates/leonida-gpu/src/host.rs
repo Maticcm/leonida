@@ -75,7 +75,87 @@ unsafe impl Sync for Host {}
 /// releases reach the host at once, from its own threads, while the host
 /// runs a submission: freeing there is a GPU page fault on the freed
 /// texture (a device hang).
-static RETIRED: Mutex<std::collections::VecDeque<(u64, Retired)>> = Mutex::new(std::collections::VecDeque::new());
+///
+/// Several queues, each under its own lock and each in the order it was
+/// pushed to: a thread that retires takes one of them for good
+/// ([`retired_queue`]), and what finishes a submission looks through all of
+/// them ([`bury`]). With one queue under one lock the threads that record the
+/// title's lists, which let go of the resources of thousands of descriptor
+/// slots a frame each, wait for each other: a push is nanoseconds, but a
+/// thread that finds the lock taken sleeps until it is woken.
+/// `LEONIDA_RETIRE_QUEUES=0`: every thread takes the first, as before.
+/// (After KyleS98/VIctory-Neo 9165dd0.)
+static RETIRED: [Mutex<std::collections::VecDeque<(u64, Retired)>>; RETIRED_QUEUES] =
+    [const { Mutex::new(std::collections::VecDeque::new()) }; RETIRED_QUEUES];
+const RETIRED_QUEUES: usize = 32;
+
+/// The queue of [`RETIRED`] the calling thread pushes to.
+fn retired_queue() -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    thread_local! {
+        // (Plain data: nothing to run when the thread ends.)
+        static MINE: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    }
+    if !crate::toggled!("LEONIDA_RETIRE_QUEUES") {
+        return 0;
+    }
+    MINE.with(|mine| {
+        if mine.get() == usize::MAX {
+            mine.set(NEXT.fetch_add(1, Ordering::Relaxed) % RETIRED_QUEUES);
+        }
+        mine.get()
+    })
+}
+
+/// Since the last frame line: objects kept for a running submission; pushes
+/// that found their queue's lock taken and the nanoseconds they waited for
+/// it, with every thread at the first queue and with a queue to each thread
+/// (all threads).
+#[cfg(feature = "diagnostics")]
+static RETIRE_WAITS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+/// Puts `entry` at the end of the calling thread's queue of [`RETIRED`].
+fn retired_push(entry: (u64, Retired)) {
+    let queue = retired_queue();
+    #[cfg(feature = "diagnostics")]
+    let mut retired = match RETIRED[queue].try_lock() {
+        Ok(retired) => retired,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            // (Only a push that has to wait is timed: there are 20,000 a frame.)
+            let began = std::time::Instant::now();
+            let retired = RETIRED[queue].lock().unwrap_or_else(|e| e.into_inner());
+            let at = 1 + 2 * usize::from(crate::toggled!("LEONIDA_RETIRE_QUEUES"));
+            RETIRE_WAITS[at].fetch_add(1, Ordering::Relaxed);
+            RETIRE_WAITS[at + 1].fetch_add(began.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            retired
+        }
+    };
+    #[cfg(not(feature = "diagnostics"))]
+    let mut retired = RETIRED[queue].lock().unwrap_or_else(|e| e.into_inner());
+    retired.push_back(entry);
+    #[cfg(feature = "diagnostics")]
+    RETIRE_WAITS[0].fetch_add(1, Ordering::Relaxed);
+}
+
+/// The retired objects' line of the frame lines, per frame ([`RETIRE_WAITS`]).
+#[cfg(feature = "diagnostics")]
+fn retire_waits_line(frames: f64) {
+    let n: Vec<f64> = RETIRE_WAITS.iter().map(|c| c.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+    if n.iter().all(|&v| v == 0.0) {
+        return;
+    }
+    tracing::info!(
+        "objects let go per frame that wait for a submission: {:.0}; their pushes that found the queue's lock taken, all threads: {:.1} waiting \
+         {:.3} ms with one queue, {:.1} waiting {:.3} ms with a queue to each thread (LEONIDA_RETIRE_QUEUES)",
+        n[0],
+        n[1],
+        n[2] / 1e6,
+        n[3],
+        n[4] / 1e6,
+    );
+}
+
 /// Submissions started and finished (waited for).
 static STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static FINISHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -473,10 +553,7 @@ pub(crate) fn retire<T: 'static>(object: T) {
         return;
     }
     RETIREMENTS[1].fetch_add(1, Ordering::Relaxed);
-    RETIRED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push_back((started, Retired::Any(Box::new(object))));
+    retired_push((started, Retired::Any(Box::new(object))));
 }
 
 /// [`retire`] for a resource.
@@ -489,7 +566,7 @@ pub(crate) fn retire_resource(object: ID3D12Resource) {
         return;
     }
     RETIREMENTS[1].fetch_add(1, Ordering::Relaxed);
-    RETIRED.lock().unwrap_or_else(|e| e.into_inner()).push_back((started, Retired::Resource(object)));
+    retired_push((started, Retired::Resource(object)));
 }
 
 /// How many submissions later than it could (the last one that may use it
@@ -507,18 +584,17 @@ fn bury_lag() -> u64 {
 }
 
 /// Drops what waited for submissions up to `finished` ([`bury_lag`]). The
-/// numbers come in order, but for threads that overtake each other: one of
-/// those is dropped a little later than it could be.
+/// numbers of a queue come in order, but for threads that overtake each
+/// other: one of those is dropped a little later than it could be. Of every
+/// queue only what has its own number behind it is taken, so with several
+/// queues nothing goes sooner than with one; between objects of two queues
+/// the order of dropping is not that of their retiring (it never was for
+/// threads that overtook each other).
 fn bury(finished: u64) {
-    let finished = finished.saturating_sub(bury_lag());
-    let done: Vec<(u64, Retired)> = {
-        let mut retired = RETIRED.lock().unwrap_or_else(|e| e.into_inner());
-        let n = retired.iter().take_while(|(at, _)| *at <= finished).count();
-        if n == 0 {
-            return;
-        }
-        retired.drain(..n).collect()
-    };
+    let done = retired_take(&RETIRED, finished.saturating_sub(bury_lag()));
+    if done.is_empty() {
+        return;
+    }
     // Let go of on the reaper thread ([`reaper`]), if there is one.
     if let Some(tx) = reaper() {
         let handed = done.len() as u64;
@@ -527,6 +603,79 @@ fn bury(finished: u64) {
             REAPING.fetch_sub(handed, Ordering::Relaxed);
             drop(done);
         }
+    }
+}
+
+/// Takes out of `queues` what waited for submissions up to `finished`: of
+/// each queue its front, as far as the numbers there are not above
+/// `finished`. No queue's lock is held when what is returned is dropped.
+fn retired_take(queues: &[Mutex<std::collections::VecDeque<(u64, Retired)>>], finished: u64) -> Vec<(u64, Retired)> {
+    let mut done = Vec::new();
+    for queue in queues {
+        let mut retired = queue.lock().unwrap_or_else(|e| e.into_inner());
+        let n = retired.iter().take_while(|(at, _)| *at <= finished).count();
+        if n != 0 {
+            done.extend(retired.drain(..n));
+        }
+    }
+    done
+}
+
+#[cfg(test)]
+mod retired_tests {
+    use super::{Retired, retired_queue, retired_take};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    /// Says its name when it is dropped.
+    struct Told(&'static str, Arc<Mutex<Vec<&'static str>>>);
+    impl Drop for Told {
+        fn drop(&mut self) {
+            self.1.lock().unwrap().push(self.0);
+        }
+    }
+
+    /// Whatever queue an object waits in, it goes when the submission it
+    /// waited for is behind it and not before; one behind a later number in
+    /// its queue (a thread overtaken) goes with that one, later than it could.
+    #[test]
+    fn what_is_retired_in_several_queues_goes_after_its_own_submission() {
+        let gone = Arc::new(Mutex::new(Vec::new()));
+        let queues: [Mutex<VecDeque<(u64, Retired)>>; 3] = [const { Mutex::new(VecDeque::new()) }; 3];
+        let put = |queue: usize, at: u64, name: &'static str| {
+            queues[queue].lock().unwrap().push_back((at, Retired::Any(Box::new(Told(name, gone.clone())))));
+        };
+        put(0, 5, "a5");
+        put(0, 7, "a7");
+        put(1, 6, "b6");
+        put(1, 4, "b4 behind b6");
+        put(2, 9, "c9");
+        let names = |taken: Vec<(u64, Retired)>| {
+            drop(taken);
+            std::mem::take(&mut *gone.lock().unwrap())
+        };
+        assert!(names(retired_take(&queues, 3)).is_empty());
+        assert_eq!(names(retired_take(&queues, 5)), ["a5"]);
+        assert_eq!(names(retired_take(&queues, 6)), ["b6", "b4 behind b6"]);
+        assert!(names(retired_take(&queues, 8)) == ["a7"]);
+        assert_eq!(names(retired_take(&queues, 9)), ["c9"]);
+        assert!(queues.iter().all(|q| q.lock().unwrap().is_empty()));
+    }
+
+    /// A thread keeps the queue it took, and threads take them in turn.
+    #[test]
+    fn a_thread_keeps_its_queue() {
+        if std::env::var_os("LEONIDA_RETIRE_QUEUES").is_some_and(|v| v == "0") {
+            return;
+        }
+        let mine = retired_queue();
+        assert_eq!(retired_queue(), mine);
+        let others: Vec<usize> = (0..4).map(|_| std::thread::spawn(|| (retired_queue(), retired_queue())).join().unwrap()).map(|(a, b)| {
+            assert_eq!(a, b);
+            a
+        }).collect();
+        assert!(others.iter().all(|&q| q < super::RETIRED_QUEUES));
+        assert!(others.windows(2).any(|w| w[0] != w[1]), "{others:?}");
     }
 }
 
@@ -540,7 +689,8 @@ static REAPING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 /// reaper thread and not dropped yet.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn waiting_to_go() -> [u64; 2] {
-    [RETIRED.lock().unwrap_or_else(|e| e.into_inner()).len() as u64, REAPING.load(Ordering::Relaxed)]
+    let waiting: usize = RETIRED.iter().map(|queue| queue.lock().unwrap_or_else(|e| e.into_inner()).len()).sum();
+    [waiting as u64, REAPING.load(Ordering::Relaxed)]
 }
 
 /// Whether what the host is done with is let go of on a thread of its own
@@ -4839,6 +4989,8 @@ fn late_line(frames: f64) {
     crate::watch::port_guard_line(frames);
     #[cfg(feature = "diagnostics")]
     crate::watch::fault_asks_line(frames);
+    #[cfg(feature = "diagnostics")]
+    retire_waits_line(frames);
     crate::port_journal::line(frames);
     crate::port::log(frames);
     crate::port_cbv::log(frames);
